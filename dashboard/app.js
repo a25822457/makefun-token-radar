@@ -1,8 +1,3 @@
-// Token Radar's plain dashboard, radar-5. It reads window.RADAR (written
-// beside dashboard/ by main.ts) and renders the ranked board, a filterable
-// table, a per-protocol detail drawer with the model's own inputs, the
-// verdict and the protocol's farm plan. No network: every byte it shows
-// is in data.js.
 (function () {
   'use strict';
 
@@ -32,13 +27,6 @@
     if (n === undefined || n === null || !isFinite(n)) return 'n/a';
     return 'x' + n.toFixed(2);
   }
-  // The model in one function: the page recomputes a row from the snapshot
-  // figures and checks the number board.json carries, so the page's code
-  // and the board's data are visibly the same arithmetic. Radar-5: the
-  // size curve is one curve per kind of protocol (the row's curve value
-  // already carries its own category's curve, range-guarded), and the
-  // category offset, the breadth adjustment and the shrunk growth and
-  // maturity terms multiply it.
   function impliedOf(row) {
     var curve = row.curve_value_usd === undefined ? row.tvl_usd * 0.2 : row.curve_value_usd;
     var cat = row.category_multiple === undefined ? 1 : row.category_multiple;
@@ -48,8 +36,6 @@
     return Math.max(1, Math.round(curve * cat * breadth * growth * maturity));
   }
 
-  // Small DOM builder: el('div', {class: 'x', text: 'hi'}, child, ...) —
-  // attrs named class/text/html/on* are special, the rest become attributes.
   function el(tag, attrs) {
     var node = document.createElement(tag);
     if (attrs) {
@@ -77,12 +63,6 @@
     return node;
   }
 
-  // Farm plans arrive in data.js, generated once by main.ts from the
-  // protocol's own category, chains, TVL, age and verdict — the same
-  // derivation that writes board.json and plans.json. The page renders
-  // row.farm_steps and row.netted; it does not re-derive them, so the
-  // plan in a detail view, the farm book and the board can never drift
-  // apart. The two portfolios arrive the same way, in DATA.portfolios.
 
   function verdictCount(v) {
     var found = (DATA.verdict_counts || []).filter(function (x) { return x.verdict === v; })[0];
@@ -136,6 +116,7 @@
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
       else if (key === 'verdict') { av = a.verdict === 'Worth farming' ? 0 : a.verdict === 'Watch' ? 1 : 2; bv = b.verdict === 'Worth farming' ? 0 : b.verdict === 'Watch' ? 1 : 2; }
+      else if (key === 'value') { av = a.value_per_dollar_usd === undefined ? 0 : a.value_per_dollar_usd; bv = b.value_per_dollar_usd === undefined ? 0 : b.value_per_dollar_usd; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
@@ -159,8 +140,8 @@
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by implied value' }),
-        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar ranks every other rankable pre-token protocol too — ' + DATA.board_size + ' rows from ' + DATA.total_protocols + ' protocols analysed. Implied value is a model, not a promise, and never a promise of an airdrop.' }),
-        el('p', { text: 'The model: one curve per kind of protocol, not one curve for all of them — log10(market cap) = a + b x log10(TVL) with its own a and b per category (the global curve is ' + f.intercept + ' + ' + f.slope + ' x log10(TVL)), fitted on ' + f.n + ' traded protocols, plus a breadth slope and shrunk seven-day-growth and age terms — the value follows from TVL, growth, age, category and breadth, every term fitted from this snapshot. Leave-one-out median miss ' + f.loo_radar3_mult + 'x, against ' + f.loo_radar2_mult + 'x for a flat category multiple; walk-forward ' + f.walk_old_new_radar3 + 'x / ' + f.walk_new_old_radar3 + 'x. Refitting the curve on ' + f.bootstrap_n + ' bootstrap resamples moves a typical row\'s rank by ' + f.bootstrap_median_rank_range + ' places — that rank range is shown on every row. Half the traded protocols land within ' + (f.band_lo_log !== undefined ? Math.round(Math.pow(10, f.band_lo_log) * 100) / 100 : '?') + 'x to ' + (f.band_hi_log !== undefined ? Math.round(Math.pow(10, f.band_hi_log) * 100) / 100 : '?') + 'x of the curve — that band is shown on every row too.' })
+        el('p', { text: 'The watchlist is the floor: 40 protocols with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar ranks every other rankable pre-token protocol too — ' + DATA.board_size + ' rows from ' + DATA.total_protocols + ' protocols analysed. Implied value is a model, not a promise, and never a promise of an airdrop.' }),
+        el('p', { text: 'The model: one curve per kind of protocol, not one curve for all of them — log10(market cap) = a + b x log10(TVL) with its own a and b per category (the global curve is ' + f.intercept + ' + ' + f.slope + ' x log10(TVL)), fitted on ' + f.n + ' traded protocols, plus a breadth slope and shrunk seven-day-growth and age terms. Leave-one-out median miss ' + f.loo_radar3_mult + 'x, against ' + f.loo_radar2_mult + 'x for a flat category multiple; walk-forward ' + f.walk_old_new_radar3 + 'x / ' + f.walk_new_old_radar3 + 'x. Ranks move too: refitting on ' + f.bootstrap_n + ' bootstrap resamples moves a typical row\'s rank by ' + f.bootstrap_median_rank_range + ' places — that rank range is shown on every row.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Protocols analysed' }), el('b', { text: String(DATA.total_protocols) })),
@@ -286,7 +267,7 @@
           el('span', { class: 'sub', text: fmtUsd(r.band_lo_usd) + ' – ' + fmtUsd(r.band_hi_usd) })
         )),
         el('td', null, el('span', { class: verdictClass(r.verdict), text: r.verdict || 'Watch' })),
-        el('td', { class: 'num', text: (r.confidence === undefined ? 'n/a' : Math.round(r.confidence * 100) + '%') })
+        el('td', { class: 'num', text: (r.value_per_dollar_usd === undefined ? 'n/a' : '$' + Math.round(r.value_per_dollar_usd).toLocaleString('en-US')) })
       );
       tbody.appendChild(tr);
     });
@@ -302,7 +283,7 @@
             sortHeader('age', 'Age'),
             sortHeader('implied', 'Implied value'),
             sortHeader('verdict', 'Verdict'),
-            el('th', { scope: 'col', text: 'Confidence' })
+            sortHeader('value', 'Value / $1')
           )),
           tbody
         )
@@ -358,7 +339,7 @@
       el('h3', { text: 'Backtest: leave-one-out and walk-forward, median multiplicative miss' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'comps' },
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Test' }), el('th', { scope: 'col', text: 'Radar-5' }), el('th', { scope: 'col', text: 'Radar-4 (one global curve)' }))),
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Test' }), el('th', { scope: 'col', text: 'Radar-6' }), el('th', { scope: 'col', text: 'Radar-4 (one global curve)' }))),
           el('tbody', null, [
             el('tr', null, el('td', { text: 'Leave-one-out, ' + f.n + ' traded protocols' }), el('td', { class: 'num', text: fmtMult(f.loo_radar3_mult) }), el('td', { class: 'num', text: fmtMult(f.loo_radar4_mult) })),
             el('tr', null, el('td', { text: 'Walk-forward: train older, test newer' }), el('td', { class: 'num', text: fmtMult(f.walk_old_new_radar3) }), el('td', { class: 'num', text: fmtMult(f.walk_old_new_radar4) })),
@@ -370,7 +351,7 @@
       ),
       el('p', { class: 'sub', text: 'What the backtest says about growth and age: their full fitted slopes are negative — fast seven-day growth mean-reverts, and an old protocol with no token carries a slightly lower multiple — so at full strength they cost leave-one-out accuracy. Shrunk to a quarter and a half they cost almost nothing (leave-one-out ' + f.loo_radar3_mult + 'x, walk-forward ' + f.walk_old_new_radar3 + 'x / ' + f.walk_new_old_radar3 + 'x), so the value carries both, at the weight the backtest supports. Both are shown on every row and both move the verdict as well: Worth farming is implied value of at least $' + Math.round(m.worth_farming_usd / 1e6) + 'M; Watch is at least $' + Math.round(m.watch_usd / 1e6) + 'M, or at least $' + Math.round(m.watch_usd / 2e6) + 'M with seven-day growth of ' + m.watch_growth_pct + '% or more; the rest is Skip. No step promises an airdrop.' }),
       el('h3', { text: 'Rank stability: ' + f.bootstrap_n + ' bootstrap refits of the curve' }),
-      el('p', { class: 'sub', text: 'Values are uncertain — half the traded protocols land ' + (f.band_lo_log !== undefined ? Math.round(Math.pow(10, f.band_lo_log) * 100) / 100 : '?') + 'x to ' + (f.band_hi_log !== undefined ? Math.round(Math.pow(10, f.band_hi_log) * 100) / 100 : '?') + 'x from the curve — and ranks move too. Refitting the curve on ' + f.bootstrap_n + ' resamples of the traded pool moves a typical row\'s rank by ' + f.bootstrap_median_rank_range + ' places (median p90–p10 rank range), because the value band is wide and rows\' values overlap. The top of the board is steadier: the top row ranks ' + (DATA.rows[0] ? DATA.rows[0].rank_lo + '–' + DATA.rows[0].rank_hi : 'n/a') + ' and lands in the top 20 in ' + (DATA.rows[0] && DATA.rows[0].top20_share !== undefined ? Math.round(DATA.rows[0].top20_share * 100) : '?') + '% of refits. Every row shows its rank range next to its point rank, and its detail view shows how often it lands in the top 20 across the refits.' }),
+      el('p', { class: 'sub', text: 'Values are uncertain — half the traded protocols land ' + (f.band_lo_log !== undefined ? Math.round(Math.pow(10, f.band_lo_log) * 100) / 100 : '?') + 'x to ' + (f.band_hi_log !== undefined ? Math.round(Math.pow(10, f.band_hi_log) * 100) / 100 : '?') + 'x from the curve — and ranks move too. Refitting the curve on ' + f.bootstrap_n + ' resamples moves a typical row\'s rank by ' + f.bootstrap_median_rank_range + ' places (median p90–p10 rank range). The top row ranks ' + (DATA.rows[0] ? DATA.rows[0].rank_lo + '–' + DATA.rows[0].rank_hi : 'n/a') + ' and lands in the top 20 in ' + (DATA.rows[0] && DATA.rows[0].top20_share !== undefined ? Math.round(DATA.rows[0].top20_share * 100) : '?') + '% of refits; every row shows its rank range next to its point rank.' }),
       el('h3', { text: 'Coverage: what happened to all ' + DATA.total_protocols + ' protocols' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'comps' },
@@ -430,12 +411,13 @@
         el('div', null, el('span', { text: 'Growth (' + fmtPct(row.change_7d) + ' over 7 days)' }), el('b', { class: 'num', text: fmtMult(row.growth_multiplier === undefined ? 1 : row.growth_multiplier) })),
         el('div', null, el('span', { text: 'Maturity (' + fmtAge(row.age_days) + ' with no token)' }), el('b', { class: 'num', text: fmtMult(row.maturity_multiplier === undefined ? 1 : row.maturity_multiplier) })),
         el('div', null, el('span', { text: 'Confidence' }), el('b', { class: 'num', text: row.confidence === undefined ? 'n/a' : Math.round(row.confidence * 100) + '%' })),
+        el('div', null, el('span', { text: 'Value per $1 committed (capital + gas)' }), el('b', { class: 'num', text: row.value_per_dollar_usd === undefined ? 'n/a' : '$' + Math.round(row.value_per_dollar_usd).toLocaleString('en-US') })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
         el('div', null, el('span', { text: 'P25–P75 band' }), el('b', { class: 'num', text: fmtUsd(row.band_lo_usd) + ' – ' + fmtUsd(row.band_hi_usd) })),
         el('div', null, el('span', { text: 'Rank range (bootstrap)' }), el('b', { class: 'num', text: (row.rank_lo !== undefined ? row.rank_lo + '–' + row.rank_hi + ' of ' + DATA.board_size : 'n/a') + (row.top20_share !== undefined ? ', top 20 in ' + Math.round(row.top20_share * 100) + '% of refits' : '') }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row)) + (impliedOf(row) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price, and the band is wide because half the traded protocols land ' + Math.round(Math.pow(10, DATA.fit.band_lo_log) * 100) / 100 + 'x to ' + Math.round(Math.pow(10, DATA.fit.band_hi_log) * 100) / 100 + 'x from the curve — and the rank moves too: across ' + DATA.fit.bootstrap_n + ' refits of the curve this row ranks ' + (row.rank_lo !== undefined ? row.rank_lo + '–' + row.rank_hi : 'n/a') + '.' }),
-      el('p', { class: 'sub', text: 'Why this rank: ' + fmtUsd(row.tvl_usd) + ' of TVL on the size curve is ' + fmtUsd(row.curve_value_usd) + ', times a category offset of ' + fmtMult(row.category_multiple === undefined ? 1 : row.category_multiple) + ', breadth of ' + fmtMult(row.breadth_multiplier === undefined ? 1 : row.breadth_multiplier) + ', growth of ' + fmtMult(row.growth_multiplier === undefined ? 1 : row.growth_multiplier) + ' (' + fmtPct(row.change_7d) + ' over 7 days) and maturity of ' + fmtMult(row.maturity_multiplier === undefined ? 1 : row.maturity_multiplier) + ' (' + fmtAge(row.age_days) + ' old with no token)' + (isEarly(row) ? ', and below the $' + Math.round(DATA.floor_usd / 1e6) + 'M watchlist floor — an early find' : ' — on the watchlist') + '. Growth and age enter shrunk: their full fitted slopes would cost leave-one-out accuracy, so the model carries a quarter of the growth effect and half of the maturity effect.' })
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row)) + (impliedOf(row) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price: half the traded protocols land ' + Math.round(Math.pow(10, DATA.fit.band_lo_log) * 100) / 100 + 'x to ' + Math.round(Math.pow(10, DATA.fit.band_hi_log) * 100) / 100 + 'x from the curve, and across ' + DATA.fit.bootstrap_n + ' refits this row ranks ' + (row.rank_lo !== undefined ? row.rank_lo + '–' + row.rank_hi : 'n/a') + '.' }),
+      el('p', { class: 'sub', text: 'Why this rank: ' + fmtUsd(row.tvl_usd) + ' of TVL on the size curve is ' + fmtUsd(row.curve_value_usd) + ', times a category offset of ' + fmtMult(row.category_multiple === undefined ? 1 : row.category_multiple) + ', breadth of ' + fmtMult(row.breadth_multiplier === undefined ? 1 : row.breadth_multiplier) + ', growth of ' + fmtMult(row.growth_multiplier === undefined ? 1 : row.growth_multiplier) + ' (' + fmtPct(row.change_7d) + ' over 7 days) and maturity of ' + fmtMult(row.maturity_multiplier === undefined ? 1 : row.maturity_multiplier) + ' (' + fmtAge(row.age_days) + ' old with no token)' + (isEarly(row) ? ', and below the $' + Math.round(DATA.floor_usd / 1e6) + 'M watchlist floor — an early find' : ' — on the watchlist') + '. Growth and age enter shrunk — a quarter of the growth effect, half of the maturity effect.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
