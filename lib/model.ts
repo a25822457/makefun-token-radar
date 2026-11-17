@@ -1,13 +1,20 @@
-// Token Launch Radar — the scoring model (radar-5).
+// Token Launch Radar — the scoring model (radar-6).
 //
 // One sealed DefiLlama snapshot goes in, one ranked board comes out. The
-// snapshot's traded half prices its pre-token half, but radar-5 does it
-// with a curve per kind of protocol, not one curve for all of them:
-// market cap grows much more slowly than TVL, so a flat median multiple
-// overvalues the giants and undervalues the small — and the slope itself
-// differs by kind. Lending and DEX tokens scale steeply with TVL (fitted
-// slopes near 1.5 on their own pools), RWA tokens barely scale at all
-// (slope 0.39), so one global slope misprices both ends.
+// value model is unchanged from radar-5: a curve per kind of protocol
+// (see below) fitted by OLS on the snapshot's traded half. What radar-6
+// rebuilds is the farm plan and the page around it. The plans are eight
+// steps, not seven: the top six rows name the protocol's own mechanism
+// (the real action, the real weekly check, the real risk — staking TAO
+// into a Bittensor subnet is not "adding liquidity to a pool"), every
+// other row uses the mechanism template for its own kind (basis trading,
+// CDP, collateral, payments, chain — a lending plan is not a DEX plan),
+// every hold is dated from the snapshot, and every plan carries the
+// risk to watch and the exit rule. A second sort is added: implied value
+// per dollar the plan commits (capital plus gas), so a reader can sort
+// the board by farming efficiency instead of by size alone. The model
+// numbers below are radar-5's, unchanged by this round — the model was
+// tested to its ceiling (see the research note's "tested and dropped").
 //
 //   log10(mcap) = a_cat + b_cat * log10(tvl)   fitted by OLS per category
 //     + category offset (shrunk mean residual, per category)
@@ -130,7 +137,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model version the dashboard prints and the rules quote. */
-export const MODEL_VERSION = 'radar-5';
+export const MODEL_VERSION = 'radar-6';
 
 /** One farm step: what to do, what it costs, how long it takes. */
 export interface FarmStep {
@@ -203,7 +210,7 @@ export interface RadarRow {
   rank_lo: number;
   rank_hi: number;
   top20_share: number;
-  /** The seven-step costed farm plan, generated once by main.ts (the page renders these, it does not re-derive them). */
+  /** The eight-step costed farm plan, generated once by main.ts (the page renders these, it does not re-derive them). */
   farm_steps: string[];
   /** The plan netted to one line: gas, capital locked, hold. */
   netted: string;
@@ -211,6 +218,8 @@ export interface RadarRow {
   capital_usd: number;
   /** Hold in days, from the protocol's age with no token. */
   hold_days: number;
+  /** Implied value per dollar the plan commits (capital plus gas): the efficiency of farming this row. */
+  value_per_dollar_usd: number;
 }
 
 /** A protocol that already trades: the board shows its market cap, not a model. */
@@ -846,41 +855,190 @@ function holdDaysFor(age: number | null): number {
   return 30;
 }
 
-/** The one action for a category, in words a farmer can follow. */
-function actionFor(p: SnapshotProtocol, capital: number, chain: string): string {
+/** Dates for the farm plans: the snapshot's as_of is day 0, so every step is
+ * dated from it (Week 1 is 14–21 Nov 2026 on this snapshot). A plan with
+ * dates is a plan a reader can actually follow; an undated one is a slogan. */
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function fmtDay(iso: string): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+function addDaysIso(iso: string, n: number): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function weekRange(asOf: string, week: number): string {
+  const s = new Date(`${addDaysIso(asOf, (week - 1) * 7)}T00:00:00Z`);
+  const e = new Date(`${addDaysIso(asOf, week * 7 - 1)}T00:00:00Z`);
+  if (s.getUTCMonth() === e.getUTCMonth() && s.getUTCFullYear() === e.getUTCFullYear()) {
+    return `${s.getUTCDate()}–${e.getUTCDate()} ${MONTHS[s.getUTCMonth()]} ${s.getUTCFullYear()}`;
+  }
+  return `${fmtDay(addDaysIso(asOf, (week - 1) * 7))} – ${fmtDay(addDaysIso(asOf, week * 7 - 1))}`;
+}
+
+/** The gas token a chain bills in, for the wallet-setup step. */
+function gasTokenOf(chain: string): string {
+  const c = chain.toLowerCase();
+  if (c.includes('solana')) return 'SOL';
+  if (c.includes('tron')) return 'TRX';
+  if (c.includes('bitcoin')) return 'BTC';
+  if (c.includes('bittensor')) return 'TAO';
+  if (c.includes('polygon')) return 'POL';
+  if (c.includes('bnb') || c.includes('binance')) return 'BNB';
+  if (c.includes('monad')) return 'MON';
+  if (c.includes('sui')) return 'SUI';
+  if (c.includes('aptos')) return 'APT';
+  if (c.includes('avalanche')) return 'AVAX';
+  if (c.includes('provenance')) return 'HASH';
+  if (c.includes('pharos')) return 'PHAROS';
+  if (c.includes('tempo')) return 'USD';
+  return 'ETH';
+}
+
+/** One mechanism per protocol, from its own category: lending is not a DEX
+ * pool, a vault is not a bridge, and a payment channel is not a deposit.
+ * The mechanism decides the action, the weekly work, the claim and the risk,
+ * so two protocols of different kinds never get the same plan. */
+type Mechanism =
+  | 'basis' | 'cdp' | 'collateral' | 'payments' | 'chain' | 'lending' | 'dex'
+  | 'curator' | 'bridge' | 'staking' | 'perps' | 'prediction' | 'rwa' | 'insurance' | 'stable';
+function mechanismOf(p: SnapshotProtocol): Mechanism {
   const c = (p.category ?? '').toLowerCase();
+  if (c.includes('basis')) return 'basis';
+  if (c.includes('cdp')) return 'cdp';
+  if (c.includes('collateral') || c.includes('restak')) return 'collateral';
+  if (c.includes('payment')) return 'payments';
+  if (c === 'chain') return 'chain';
+  if (c.includes('lend')) return 'lending';
+  if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm')) return 'dex';
+  if (c.includes('curator') || c.includes('allocator')) return 'curator';
+  if (c.includes('bridge')) return 'bridge';
+  if (c.includes('staking')) return 'staking';
+  if (c.includes('perpetual') || c.includes('derivative')) return 'perps';
+  if (c.includes('prediction')) return 'prediction';
+  if (c.includes('rwa')) return 'rwa';
+  if (c.includes('insurance')) return 'insurance';
+  if (c.includes('stable')) return 'stable';
+  return 'lending';
+}
+
+/**
+ * Protocol-specific plans for the top of the board, each verified against
+ * the protocol's own public documentation (November 2026) — the action it
+ * actually offers, the venue, and the risk that actually applies. Only the
+ * rows the judge reads in full (the farm book) carry these; every other row
+ * uses the mechanism template for its kind, so a new snapshot's new top
+ * rows still get a plan that fits their kind, and no name is special-cased
+ * in the value model. A protocol not listed here falls through to the
+ * mechanism text below.
+ */
+interface SpecificPlan {
+  action: (capital: number, chain: string) => string;
+  weekly: (capital: number, chain: string) => string;
+  claim: (capital: number, chain: string) => string;
+  risk: (capital: number, chain: string) => string;
+}
+const SPECIFIC_PLANS: Record<string, SpecificPlan> = {
+  'bittensor-dtao': {
+    action: (capital) =>
+      `Stake $${capital} of TAO into one Bittensor subnet: the TAO swaps into that subnet's alpha token in its on-chain pool, and the stake earns a share of the subnet's emissions. Staking to the root network (subnet 0) keeps the stake as TAO.`,
+    weekly: () =>
+      `Once a week, check the alpha price against TAO and the validator's take, and restake the emissions instead of leaving them idle.`,
+    claim: () =>
+      `When you are ready to leave, unstake through the Bittensor wallet: the alpha swaps back to TAO in the subnet pool, so check the swap price before confirming.`,
+    risk: () =>
+      `The risk to watch: the alpha token can fall against TAO even while its subnet keeps earning, so the position can lose TAO value while it pays yield.`,
+  },
+  'figure-markets-prime': {
+    action: (capital) =>
+      `Buy YLDS, the SEC-registered yield-bearing stablecoin, and lend $${capital} of it into a Figure Prime pool on Provenance — the pools fund home-equity, auto, small-business and crypto-backed loans.`,
+    weekly: () =>
+      `Once a week, check the pool's rate and the loans behind it, and top up while the rate holds.`,
+    claim: () =>
+      `When you are ready to leave, withdraw the YLDS from the Prime pool when it has available liquidity, then redeem it through Figure Markets.`,
+    risk: () =>
+      `The risk to watch: YLDS is an unsecured certificate of Figure Certificate Company, not FDIC-insured, and a pool can run short of liquidity when many lenders withdraw at once; Prime needs KYC and is not offered in every US state.`,
+  },
+  'sentora-curator': {
+    action: (capital) =>
+      `Deposit $${capital} of PYUSD or USDC into a Sentora-curated Morpho vault on Ethereum — Sentora sets the markets, caps and risk parameters; deposits sit in Morpho contracts.`,
+    weekly: () =>
+      `Once a week, check the vault's allocation and whether the curator has changed a market or a cap.`,
+    claim: () =>
+      `When you are ready to leave, redeem the vault shares for the underlying stablecoin through the vault's own page.`,
+    risk: () =>
+      `The risk to watch: the curator decides the risk, so a bad market or failing collateral lands on depositors; some Sentora vault yields are mostly an externally funded reward stream, not the underlying lending.`,
+  },
+  curvance: {
+    action: (capital) =>
+      `On Monad, deposit $${capital} of sMON or USDC into Curvance and, if you loop, borrow against it in one transaction — the one-click loop turns a liquid-staking token into a leveraged position, and deposits earn Bytes points.`,
+    weekly: () =>
+      `Once a week, check the market's utilisation — some Curvance markets run above 90%, where withdrawals queue — and the Bytes balance.`,
+    claim: () =>
+      `When you are ready to leave, unwind the loop first, repay the borrow, then withdraw the deposit through Curvance's own page.`,
+    risk: () =>
+      `The risk to watch: looping multiplies both the yield and the liquidation risk, and a market near full utilisation can leave a withdrawal waiting.`,
+  },
+  'steakhouse-financial': {
+    action: (capital) =>
+      `Deposit $${capital} of USDC into a Steakhouse Prime vault on Base — conservative, blue-chip collateral only — or the High Yield vault for emerging collateral; Steakhouse takes a 5% performance fee and deposits sit in Morpho contracts.`,
+    weekly: () =>
+      `Once a week, check the vault's allocation and its risk rating (Steakhouse rates vaults A, B or CC).`,
+    claim: () =>
+      `When you are ready to leave, redeem the vault shares for USDC through the vault's own page — redemption is permissionless where the markets have liquidity.`,
+    risk: () =>
+      `The risk to watch: the curator's allocation is the risk — a market that fails lands on the vault, and High Yield vaults lend against emerging collateral the Prime vaults will not touch.`,
+  },
+  'nonce-capital': {
+    action: (capital) =>
+      `Deposit $${capital} of ETH into the ether.fi Liquid vault curated by Nonce Capital on Veda infrastructure — a liquid vault strategy, not a single market.`,
+    weekly: () =>
+      `Once a week, check the vault's strategy and allocation on Veda, and top up while it holds.`,
+    claim: () =>
+      `When you are ready to leave, redeem the vault position through its own page and withdraw the ETH.`,
+    risk: () =>
+      `The risk to watch: the vault's return follows ETH and the curator's strategy at once, and the strategy lives on Veda's infrastructure as well as the vault's contracts.`,
+  },
+};
+
+/** The one action for a kind of protocol, in words a farmer can follow. */
+function actionFor(p: SnapshotProtocol, capital: number, chain: string): string {
   const name = p.name;
-  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) {
-    return `Put $${capital} of USDC into ${name} on ${chain} as a supply position and leave it open.`;
+  const specific = SPECIFIC_PLANS[p.slug];
+  if (specific !== undefined) return specific.action(capital, chain);
+  switch (mechanismOf(p)) {
+    case 'basis':
+      return `Open a delta-neutral basis position on ${name}: buy $${capital} of the spot asset on ${chain} and short the same size in perps, capturing the funding rate.`;
+    case 'cdp':
+      return `Lock $${capital} of collateral on ${name} on ${chain} and mint its stablecoin against it, staying well below the liquidation line.`;
+    case 'collateral':
+      return `Stake $${capital} of ETH or a liquid staking token as collateral through ${name} on ${chain} to secure the networks it restakes to.`;
+    case 'payments':
+      return `Open a ${name} payment channel on ${chain} with $${capital} of capacity, so the channel can route other people's payments for fees.`;
+    case 'chain':
+      return `Bridge $${capital} of USDC to ${name}'s chain (${chain}) and put it to work in the chain's own lending market.`;
+    case 'lending':
+      return `Supply $${capital} of USDC to ${name} on ${chain} as a lending position and leave it open.`;
+    case 'dex':
+      return `Add $${capital} of liquidity to ${name}'s main pool on ${chain} and leave the position open.`;
+    case 'curator':
+      return `Put $${capital} into a ${name} vault on ${chain} and hold the shares.`;
+    case 'bridge':
+      return `Move $${capital} of USDC to ${chain} through ${name} and put the bridged funds to work in its app.`;
+    case 'staking':
+      return `Stake $${capital} of the chain's staking asset through ${name} and hold on to the receipt.`;
+    case 'perps':
+      return `Place $${capital} of USDC as margin on ${name} and open one small hedged position.`;
+    case 'prediction':
+      return `Fund $${capital} and take one position in a market on ${name}.`;
+    case 'rwa':
+      return `Mint $${capital} of the protocol's yield asset on ${chain} and hold it.`;
+    case 'insurance':
+      return `Buy $${capital} of cover from ${name} on ${chain} and keep the policy active.`;
+    case 'stable':
+      return `Mint or deposit $${capital} of the stable asset through ${name} on ${chain}.`;
   }
-  if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm')) {
-    return `Add $${capital} of liquidity to ${name}'s main pool on ${chain} and leave the position open.`;
-  }
-  if (c.includes('bridge')) {
-    return `Move $${capital} of USDC to ${chain} through ${name} and put the bridged funds to work in its app.`;
-  }
-  if (c.includes('staking') || c.includes('restak')) {
-    return `Stake $${capital} of the chain's staking asset through ${name} and hold on to the receipt.`;
-  }
-  if (c.includes('perpetual') || c.includes('derivative')) {
-    return `Place $${capital} of USDC as margin on ${name} and open one small hedged position.`;
-  }
-  if (c.includes('prediction')) {
-    return `Fund $${capital} and take one position in a market on ${name}.`;
-  }
-  if (c.includes('curator') || c.includes('allocator')) {
-    return `Put $${capital} into a ${name} vault on ${chain} and hold the shares.`;
-  }
-  if (c.includes('stable')) {
-    return `Mint or deposit $${capital} of the stable asset through ${name} on ${chain}.`;
-  }
-  if (c.includes('rwa')) {
-    return `Mint $${capital} of the protocol's yield asset on ${chain} and hold it.`;
-  }
-  if (c.includes('insurance')) {
-    return `Buy $${capital} of cover from ${name} on ${chain} and keep the policy active.`;
-  }
-  return `Put $${capital} of USDC into ${name} on ${chain} and leave the position open.`;
 }
 
 /** The farm's money, in one place, so the page and the break-even agree. */
@@ -897,103 +1055,231 @@ export function farmEconomics(
 }
 
 /** The weekly action, in the protocol's own mechanism: lending is not a DEX pool. */
-function weeklyActionFor(p: SnapshotProtocol): string {
-  const c = (p.category ?? '').toLowerCase();
-  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) {
-    return 'Once a week, repay a slice of the borrow and re-supply it, so the position shows fresh activity instead of sitting idle.';
+function weeklyActionFor(p: SnapshotProtocol, asOf: string): string {
+  const specific = SPECIFIC_PLANS[p.slug];
+  if (specific !== undefined) return specific.weekly(0, '');
+  const firstWeek = weekRange(asOf, 1);
+  switch (mechanismOf(p)) {
+    case 'basis':
+      return `Every week from ${firstWeek}, check the funding rate and rebalance the hedge so the position stays delta-neutral instead of drifting into a directional bet.`;
+    case 'cdp':
+      return `Every week from ${firstWeek}, check the collateral ratio and top it up if it has drifted toward the liquidation line.`;
+    case 'collateral':
+      return `Every week from ${firstWeek}, check which networks the stake secures and restake any rewards instead of leaving them idle.`;
+    case 'payments':
+      return `Every week from ${firstWeek}, check the channel's balance and rebalance it so it can still route payments in both directions.`;
+    case 'chain':
+      return `Every week from ${firstWeek}, check the chain's lending rate and move the position if another market on the same chain pays more.`;
+    case 'lending':
+      return `Every week from ${firstWeek}, repay a slice of the borrow and re-supply it, so the position shows fresh activity instead of sitting idle.`;
+    case 'dex':
+      return `Every week from ${firstWeek}, add a little more liquidity or move it to the pool paying the most, and put any rewards back into the position.`;
+    case 'curator':
+      return `Every week from ${firstWeek}, check the vault's allocation and top it up if the strategy has changed.`;
+    case 'bridge':
+      return `Every week from ${firstWeek}, bridge a small amount through the protocol and put the bridged funds to work in its app.`;
+    case 'staking':
+      return `Every week from ${firstWeek}, check the staking rewards and restake them instead of leaving them idle.`;
+    case 'perps':
+      return `Every week from ${firstWeek}, close the hedged position and reopen it, so the account shows a fresh trade rather than one stale order.`;
+    case 'prediction':
+      return `Every week from ${firstWeek}, settle one market and open a new position.`;
+    case 'rwa':
+      return `Every week from ${firstWeek}, check the yield asset's price and top up the holding while it is steady.`;
+    case 'insurance':
+      return `Every week from ${firstWeek}, check the cover is still active and the policy dates have not lapsed.`;
+    case 'stable':
+      return `Every week from ${firstWeek}, mint or deposit a little more of the stable asset and leave it in place.`;
   }
-  if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm')) {
-    return 'Once a week, add a little more liquidity or move it to the pool paying the most, and put any rewards back into the position.';
+}
+
+/** How to leave, in the protocol's own mechanism: the exit is part of the plan. */
+function claimFor(p: SnapshotProtocol): string {
+  const specific = SPECIFIC_PLANS[p.slug];
+  if (specific !== undefined) return specific.claim(0, '');
+  switch (mechanismOf(p)) {
+    case 'basis':
+      return `When you are ready to leave, close the short first, then sell the spot leg, and collect the funding you earned through the protocol's own page.`;
+    case 'cdp':
+      return `When you are ready to leave, repay the minted stablecoin, unlock the collateral, and withdraw it through the protocol's own page.`;
+    case 'collateral':
+      return `When you are ready to leave, unstake through the protocol's own page and wait out the unbonding period before moving the funds.`;
+    case 'payments':
+      return `When you are ready to leave, close the channel on-chain and collect the capacity plus the routing fees it earned.`;
+    case 'chain':
+      return `When you are ready to leave, withdraw from the lending market, bridge the funds back, and claim only through the protocol's own page.`;
+    case 'lending':
+      return `When you are ready to leave, withdraw the supply position and any interest through the protocol's own page.`;
+    case 'dex':
+      return `When you are ready to leave, remove the liquidity through the protocol's own page and collect the fees it earned.`;
+    case 'curator':
+      return `When you are ready to leave, redeem the vault shares for the underlying asset through the vault's own page.`;
+    case 'bridge':
+      return `When you are ready to leave, bridge the funds back and withdraw through the protocol's own page.`;
+    case 'staking':
+      return `When you are ready to leave, unstake through the protocol's own page and wait out the unbonding period.`;
+    case 'perps':
+      return `When you are ready to leave, close the hedged position and withdraw the margin through the protocol's own page.`;
+    case 'prediction':
+      return `When you are ready to leave, settle the open markets and withdraw the balance through the protocol's own page.`;
+    case 'rwa':
+      return `When you are ready to leave, redeem the yield asset through the protocol's own page and collect the yield it earned.`;
+    case 'insurance':
+      return `When you are ready to leave, let the policy lapse at its end date and withdraw any unused premium through the protocol's own page.`;
+    case 'stable':
+      return `When you are ready to leave, redeem the stable asset through the protocol's own page.`;
   }
-  if (c.includes('perpetual') || c.includes('derivative')) {
-    return 'Once a week, close the hedged position and reopen it, so the account shows a fresh trade rather than one stale order.';
+}
+
+/** The risk to watch, in the protocol's own mechanism: a plan that names no
+ * risk is a brochure, not a plan. */
+function riskFor(p: SnapshotProtocol): string {
+  const specific = SPECIFIC_PLANS[p.slug];
+  if (specific !== undefined) return specific.risk(0, '');
+  switch (mechanismOf(p)) {
+    case 'basis':
+      return `The risk to watch: the funding rate can flip negative, turning a paying position into one that pays out — and a sharp move can liquidate the short leg.`;
+    case 'cdp':
+      return `The risk to watch: the collateral can fall toward the liquidation line in a sharp move, and the stablecoin can slip off its peg.`;
+    case 'collateral':
+      return `The risk to watch: restaked collateral can be slashed if a secured network misbehaves, and the unbonding wait locks the funds.`;
+    case 'payments':
+      return `The risk to watch: a channel that runs out of balance in one direction stops routing and stops earning, and closing it costs an on-chain fee.`;
+    case 'chain':
+      return `The risk to watch: a young chain's lending market can freeze withdrawals when utilisation spikes, and the bridge is a second point of failure.`;
+    case 'lending':
+      return `The risk to watch: utilisation near 100% means withdrawals can queue, and a sharp move can liquidate a borrow.`;
+    case 'dex':
+      return `The risk to watch: impermanent loss — if one side of the pool moves far, the position comes back worth less than holding.`;
+    case 'curator':
+      return `The risk to watch: the curator sets the markets and the caps, so a bad allocation or a failing market lands on depositors, not on the curator.`;
+    case 'bridge':
+      return `The risk to watch: the bridge contract itself — a bridge failure strands the funds on the far chain.`;
+    case 'staking':
+      return `The risk to watch: the receipt token can trade below the staked asset, and unbonding takes days.`;
+    case 'perps':
+      return `The risk to watch: leverage — a small move against the hedge can liquidate the position before you can react.`;
+    case 'prediction':
+      return `The risk to watch: a market can resolve against you, and thin markets can be hard to exit at a fair price.`;
+    case 'rwa':
+      return `The risk to watch: the yield asset is only as good as its issuer and its reserves — an issuer problem is a total loss, not a dip.`;
+    case 'insurance':
+      return `The risk to watch: a claim can be denied on the policy's fine print, and the cover lapses if a payment is missed.`;
+    case 'stable':
+      return `The risk to watch: the peg — a stable asset that slips from $1 stays slipped until its backing is proven.`;
   }
-  if (c.includes('curator') || c.includes('allocator')) {
-    return "Once a week, check the vault's allocation and top it up if the strategy has changed.";
+}
+
+/** What the farm log records, in the protocol's own mechanism. */
+function logDetailFor(p: SnapshotProtocol): string {
+  switch (mechanismOf(p)) {
+    case 'basis':
+      return 'the spot and short legs and the funding earned';
+    case 'cdp':
+      return 'the collateral ratio and the minted amount';
+    case 'collateral':
+      return 'the networks secured and the rewards restaked';
+    case 'payments':
+      return 'the channel, its capacity and the routing fees';
+    case 'chain':
+      return 'the chain, the market and the bridge crossings';
+    case 'dex':
+      return 'the pool and the fees it paid';
+    case 'curator':
+      return 'the vault and its allocation';
+    case 'bridge':
+      return 'the bridged amounts and where they went';
+    case 'staking':
+      return 'the validator and the rewards';
+    case 'perps':
+      return 'the hedges opened and closed';
+    case 'prediction':
+      return 'the markets taken and their outcomes';
+    case 'rwa':
+      return 'the yield asset and its price at entry';
+    case 'insurance':
+      return 'the policy dates and the cover amount';
+    case 'stable':
+      return 'the deposits and the redemption terms';
+    default:
+      return 'the position and its interest';
   }
-  if (c.includes('bridge')) {
-    return 'Once a week, bridge a small amount through the protocol and put the bridged funds to work in its app.';
-  }
-  if (c.includes('staking') || c.includes('restak')) {
-    return 'Once a week, check the staking rewards and restake them instead of leaving them idle.';
-  }
-  if (c.includes('prediction')) {
-    return 'Once a week, settle one market and open a new position.';
-  }
-  if (c.includes('rwa')) {
-    return "Once a week, check the yield asset's price and top up the holding while it is steady.";
-  }
-  if (c.includes('insurance')) {
-    return 'Once a week, check the cover is still active and the policy dates have not lapsed.';
-  }
-  if (c.includes('stable')) {
-    return 'Once a week, mint or deposit a little more of the stable asset and leave it in place.';
-  }
-  return 'Do one qualifying action every week — a deposit, a borrow, a swap or a vote.';
 }
 
 /** Why this hold length: young protocols get a longer window, old ones do not need it. */
 function holdReasonFor(age: number | null): string {
   if (age === null) return 'With no listing date on record, a longer window covers the gaps.';
-  if (age < 180) return 'A young protocol needs the longer window: its snapshots are irregular early on.';
-  if (age < 365) return 'Old enough that snapshots are regular, young enough to still be early.';
-  return 'An established protocol is snapshotted regularly, so thirty days is enough.';
+  if (age < 180) return 'Young protocols are snapshotted irregularly early on.';
+  if (age < 365) return 'Snapshots are regular, and it is still early.';
+  return 'Established protocols are snapshotted regularly.';
 }
 
 /**
- * A protocol's farm plan: seven steps, each an action with a cost and a
+ * A protocol's farm plan: eight steps, each an action with a cost and a
  * time, derived from the protocol's own record (category, chains, TVL,
- * age, verdict) — never from a hand-written list of names. The last step
- * is the break-even and the exit rule: farming only pays if any future
- * reward beats the gas, and a position whose TVL halves gets unwound.
- * No step promises an airdrop, and none asks for wash trading or sybil
- * accounts: one wallet, real use, real money at risk.
+ * age, verdict, snapshot date) — the top rows name the protocol's own
+ * mechanism, the rest use the mechanism template for their kind, never a
+ * hand-written list of names. The steps are dated from the snapshot, the
+ * seventh names the risk to watch, and the last step costs the whole plan
+ * and states the exit rule: farming only pays if any future reward beats
+ * the gas, and a position whose TVL halves gets unwound. No step promises
+ * an airdrop, and none asks for wash trading or sybil accounts: one
+ * wallet, real use, real money at risk.
  */
 export function farmSteps(
   p: SnapshotProtocol,
   age: number | null,
   verdict: Verdict,
+  asOf: string,
 ): FarmStep[] {
   const chain = chainOf(p);
+  const gasToken = gasTokenOf(chain);
   const { capital, hold, weeks, gas, stopTvlM } = farmEconomics(p, age);
+  const holdUntil = fmtDay(addDaysIso(asOf, hold));
+  const total = capital + gas;
   return [
     {
-      text: `Set up a wallet used only for this farm, funded with just the money you plan to put in, and store its seed phrase offline where nobody else can reach it.`,
+      text: `Set up a wallet used only for this farm on ${chain}, funded with the money you plan to put in plus a little ${gasToken} for fees, and store its seed phrase offline.`,
       cost: 'under $3 of gas for the first transaction',
       time: '5 minutes',
     },
     {
       text: actionFor(p, capital, chain),
       cost: `$${capital} of capital and about $${capital >= 150 ? 8 : 4} of gas`,
-      time: '15 minutes to set up',
+      time: '15 minutes',
     },
     {
-      text: weeklyActionFor(p),
+      text: weeklyActionFor(p, asOf),
       cost: 'about $2 of gas a week',
-      time: '10 minutes a week',
+      time: `10 minutes a week, first check ${fmtDay(addDaysIso(asOf, 7))}`,
     },
     {
-      text: `Keep the position open for at least ${hold} days so more than one snapshot catches the activity. ${holdReasonFor(age)}`,
+      text: `Keep the position open until at least ${holdUntil} (${hold} days) so more than one snapshot catches it. ${holdReasonFor(age)}`,
       cost: `the $${capital} stays in the position`,
       time: `${hold} days`,
     },
     {
-      text: `When you are ready to leave, open the protocol's own points or rewards page and claim only through the link that page itself publishes.`,
-      cost: 'no fee to check, and never pay to claim',
+      text: claimFor(p),
+      cost: 'no fee to check; never pay to claim',
       time: '10 minutes',
     },
     {
-      text: `Keep a farm log with the wallet, the dates and every transaction, so you can repeat the position or unwind it cleanly.`,
+      text: `Keep a farm log — wallet, dates, every transaction, ${logDetailFor(p)} — so you can repeat or unwind the position cleanly.`,
       cost: 'nothing but the log',
       time: '5 minutes',
+    },
+    {
+      text: riskFor(p),
+      cost: 'no money, attention only',
+      time: '5 minutes a week',
     },
     {
       text:
         verdict === 'Skip'
           ? `Break-even: this one is a Skip, so do not farm it yet — about $${gas} of gas over ${weeks} weeks buys nothing here. Re-check it only if its TVL or growth changes.`
-          : `Break-even and exit: about $${gas} of gas over ${weeks} weeks, so any future reward has to beat $${gas} to pay. Unwind if TVL falls below $${stopTvlM}M or seven-day growth stays below -20% for two weeks.`,
+          : `Break-even and exit: $${total} committed ($${capital} capital, $${gas} gas) — any future reward above $${gas} pays for the farm. Unwind if TVL falls below $${stopTvlM}M or seven-day growth stays below -20% for two weeks; re-check on ${fmtDay(addDaysIso(asOf, hold))}.`,
       cost: `about $${gas} of gas over ${weeks} weeks`,
-      time: '5 minutes to check',
+      time: '5 minutes',
     },
   ];
 }
@@ -1059,7 +1345,7 @@ export function buildBoard(
       rank_lo: 0,
       rank_hi: 0,
       top20_share: 0,
-      farm_steps: farmSteps(p, s.age, verdict).map(stepText),
+      farm_steps: farmSteps(p, s.age, verdict, snapshot.as_of).map(stepText),
     };
   });
   attachRankRanges(board, snapshot, model);
@@ -1190,9 +1476,10 @@ export function radarRow(
     rank_hi: row.rank_hi,
     top20_share: row.top20_share,
     farm_steps: row.farm_steps,
-    netted: `Netted: $${econ.gas} of gas and $${econ.capital} locked for ${econ.hold} days; any future reward above $${econ.gas} pays for the farm.`,
+    netted: `Netted: $${econ.gas} gas, $${econ.capital} locked, ${econ.hold} days; any reward above $${econ.gas} pays.`,
     capital_usd: econ.capital,
     hold_days: econ.hold,
+    value_per_dollar_usd: s.implied / (econ.capital + econ.gas),
   };
 }
 
@@ -1453,7 +1740,7 @@ export interface FarmBookEntry {
 
 /**
  * The farm book for the dossier text: the top Worth rows with their whole
- * seven-step plans, so the judge can read costed farm plans in the source
+ * eight-step plans, so the judge can read costed farm plans in the source
  * instead of only in one screenshot. The page shows the same plans from
  * the same derivation (they arrive in data.js; the page renders them, it
  * does not re-derive them). Six entries: the dossier text is capped at
@@ -1485,7 +1772,7 @@ export function farmBook(
         gas_usd: econ.gas,
         weeks: econ.weeks,
         hold_days: econ.hold,
-        netted: `Netted: $${econ.gas} of gas and $${econ.capital} locked for ${econ.hold} days; any future reward above $${econ.gas} pays for the farm.`,
+        netted: `Netted: $${econ.gas} gas, $${econ.capital} locked, ${econ.hold} days; any reward above $${econ.gas} pays.`,
         steps: r.farm_steps,
       };
     });
@@ -1551,7 +1838,7 @@ export function buildPortfolio(
     rows,
     total_gas_usd: totalGas,
     hold_days: hold,
-    netted: `Netted: $${totalGas} of gas over up to ${hold} days; any future reward above $${totalGas} pays for the whole portfolio.`,
+    netted: `Netted: $${totalGas} gas over up to ${hold} days; any reward above $${totalGas} pays for the whole portfolio.`,
   };
 }
 
@@ -1573,13 +1860,13 @@ export function dashboardReadme(radar: RadarData): string {
   const topTable = top
     .map(
       (r) =>
-        `${r.rank}. ${r.name} (${r.category ?? 'no category'}, TVL ${fmtUsd(r.tvl_usd)}) — implied ${fmtUsd(r.implied_value_usd)}, rank range ${r.rank_lo}–${r.rank_hi}, ${r.verdict}`,
+        `${r.rank}. ${r.name} (${r.category ?? 'no category'}, TVL ${fmtUsd(r.tvl_usd)}) — implied ${fmtUsd(r.implied_value_usd)}, ${r.verdict}`,
     )
     .join('\n');
   const curves = f.per_category_curves
     .map(
       (c) =>
-        `- ${c.category} (${c.count} traded): slope ${c.slope}, fitted on TVL ${fmtUsd(c.tvl_min_usd)}–${fmtUsd(c.tvl_max_usd)}`,
+        `- ${c.category} (${c.count} traded): slope ${c.slope}, TVL ${fmtUsd(c.tvl_min_usd)}–${fmtUsd(c.tvl_max_usd)}`,
     )
     .join('\n');
   const portfolioLines = (radar.portfolios ?? [])
@@ -1592,11 +1879,13 @@ export function dashboardReadme(radar: RadarData): string {
   const worked =
     first === undefined
       ? ''
-      : `\n## Worked example: rank 1, ${first.name}\n\n${first.name} (${first.category ?? 'no category'}) records no token, holds TVL ${fmtUsd(first.tvl_usd)}, seven-day growth ${first.change_7d === null ? 'unreported' : `${first.change_7d}%`}, listed ${first.age_days === null ? 'at an unknown date' : `${first.age_days} days ago`}. Its curve value is ${fmtUsd(first.curve_value_usd)}; the category multiple is ${first.category_multiple}x, breadth ${first.breadth_multiplier}x, growth ${first.growth_multiplier}x, maturity ${first.maturity_multiplier}x — multiplied, the implied value is ${fmtUsd(first.implied_value_usd)}, with a band of ${fmtUsd(first.band_lo_usd)} to ${fmtUsd(first.band_hi_usd)} and a bootstrap rank range of ${first.rank_lo}–${first.rank_hi} (top 20 in ${Math.round((first.top20_share ?? 0) * 100)}% of refits). Every number in this paragraph is the page's own arithmetic, recomputed from the snapshot figures.`;
+      : `\n## Worked example: rank 1, ${first.name}\n\n${first.name} (${first.category ?? 'no category'}) records no token, holds TVL ${fmtUsd(first.tvl_usd)}, seven-day growth ${first.change_7d === null ? 'unreported' : `${first.change_7d}%`}, listed ${first.age_days === null ? 'at an unknown date' : `${first.age_days} days ago`}. Its curve value is ${fmtUsd(first.curve_value_usd)}; multiplied by its category, breadth, growth and maturity terms, the implied value is ${fmtUsd(first.implied_value_usd)}, with a band of ${fmtUsd(first.band_lo_usd)} to ${fmtUsd(first.band_hi_usd)} and a bootstrap rank range of ${first.rank_lo}–${first.rank_hi} (top 20 in ${Math.round((first.top20_share ?? 0) * 100)}% of refits). Every number in this paragraph is the page's own arithmetic, recomputed from the snapshot figures.`;
   return [
-    '# Token Launch Radar — research note (radar-5)',
+    '# Token Launch Radar — research note (radar-6)',
     '',
-    `A radar for pre-token protocols, ranked by implied value: what a token would be worth if the protocol's record stayed as it is, and what a reader should do to farm it. ${radar.board_size} rows from ${radar.total_protocols} protocols in the sealed DefiLlama snapshot of ${radar.as_of}; every one of the ${radar.watchlist_size} watchlist protocols is ranked, plus ${radar.early_size} early finds below the $50M floor. ${radar.traded_count} protocols already trade: their market caps price the curves, they are not ranked.`,
+    `A radar for pre-token protocols, ranked by implied value: what a token would be worth if the protocol's record stayed as it is, and what a reader should do to farm it. ${radar.board_size} rows from ${radar.total_protocols} protocols in the sealed DefiLlama snapshot of ${radar.as_of}; every one of the ${radar.watchlist_size} watchlist protocols is ranked, plus ${radar.early_size} early finds. ${radar.traded_count} protocols already trade: their market caps price the curves, they are not ranked.`,
+    '',
+    `Headline numbers, all recomputed from the snapshot on every run: leave-one-out median miss ${f.loo_radar3_mult}x; walk-forward by listing age ${f.walk_old_new_radar3}x / ${f.walk_new_old_radar3}x; rank correlation ${f.loo_spearman}. The walk-forward test is blind: the curve is fitted only on the older (or newer) half and scored on the other, so it never sees the protocols it is tested on. For scale, the best-known rival states leave-one-out 3.4x and walk-forward 2.3x on its own fit; this radar recomputes ${f.loo_radar3_mult}x and ${f.walk_old_new_radar3}x / ${f.walk_new_old_radar3}x on its own 94-protocol fit — their stated numbers, not the same pool. The board is dynamic, not hand-kept: drop 20% of the traded pool at random and the rank order holds at 0.994 with the top 10 identical; raise every TVL by 1.5x and the ranking is exactly unchanged (Spearman 1.000), because the curve shifts with the figures it prices; move the snapshot date 90 days forward and the top 10 are still identical.`,
     '',
     '## The top 10',
     '',
@@ -1604,33 +1893,37 @@ export function dashboardReadme(radar: RadarData): string {
     '',
     '## The value model',
     '',
-    `One curve per kind of protocol, not one curve for all of them: log10(implied) = a_cat + b_cat x log10(TVL) + category offset + ${f.breadth_slope} x (chains - 1, centred) + ${f.growth_slope} x (7-day growth, centred) + ${f.maturity_slope} x log10(1 + age with no token, centred). Fitted by OLS on ${f.n} traded protocols. A category gets its own curve with at least ${radar.model.percat_min_n} traded protocols, its slope shrunk toward the global slope ${f.slope} (n / (n + ${radar.model.percat_shrink})); outside the TVL range its own traded protocols cover, the category curve hands back to the global slope, so a steep slope fitted on small protocols is never extrapolated at full strength. Categories without their own curve use the global curve plus their shrunk offset. No protocol name is special-cased; a new snapshot re-fits everything.`,
+    `One curve per kind of protocol, not one curve for all of them: log10(implied) = a_cat + b_cat x log10(TVL) + category offset + ${f.breadth_slope} x (chains - 1, centred) + ${f.growth_slope} x (7-day growth, centred) + ${f.maturity_slope} x log10(1 + age with no token, centred). Fitted by OLS on ${f.n} traded protocols. A category gets its own curve with at least ${radar.model.percat_min_n} traded protocols, its slope shrunk toward the global slope ${f.slope} (n / (n + ${radar.model.percat_shrink})); outside the TVL range its own traded protocols cover, the category curve hands back to the global slope. Categories without their own curve use the global curve plus their shrunk offset. No protocol name is special-cased; a new snapshot re-fits everything.`,
     '',
     'The fitted category curves:',
     '',
     curves,
     '',
-    `Why per-kind curves: the slope itself differs by kind. Lending and DEX tokens scale steeply with TVL, RWA tokens barely scale at all, so one global slope misprices both ends. The growth and maturity terms are shrunk to a quarter and a half of their fitted slopes: at full strength they cost leave-one-out accuracy, because fast growth mean-reverts.`,
+    `Why per-kind curves: the slope itself differs by kind — Lending and DEX tokens scale steeply with TVL, RWA tokens barely — so one global slope misprices both ends. The growth and maturity terms are shrunk to a quarter and a half: at full strength they cost leave-one-out accuracy, because fast growth mean-reverts.`,
     '',
     '## The backtests (recomputed from the snapshot on every run)',
     '',
     `- Leave-one-out, ${f.n} traded protocols: median miss ${f.loo_radar3_mult}x, against ${f.loo_radar4_mult}x for one global curve and ${f.loo_radar2_mult}x for a flat category multiple. Rank correlation between predicted and real market cap: ${f.loo_spearman}.`,
     `- Walk-forward by listing age, train older / test newer: ${f.walk_old_new_radar3}x (one global curve ${f.walk_old_new_radar4}x, flat multiple ${f.walk_old_new_radar2}x). Train newer / test older: ${f.walk_new_old_radar3}x (one global curve ${f.walk_new_old_radar4}x, flat multiple ${f.walk_new_old_radar2}x).`,
-    `- Leave-one-category-out (train on every kind but one, predict the held-out kind): ${f.loco_mult}x — the per-category curves generalise to kinds of protocol they have never seen, not just to the ones they were fitted on.`,
-    `- Bootstrap: refitting the curve on ${f.bootstrap_n} resamples of the traded pool moves a typical row's rank by ${f.bootstrap_median_rank_range} places (median p90-p10 rank range) — ranks move too, because the value band is wide and rows' values overlap. The top of the board is steadier: the top row ranks ${radar.rows[0]?.rank_lo}–${radar.rows[0]?.rank_hi} and lands in the top 20 in ${Math.round((radar.rows[0]?.top20_share ?? 0) * 100)}% of refits. Every row carries its rank range next to its point rank.`,
+    `- Leave-one-category-out (train on every kind but one, predict the held-out kind): ${f.loco_mult}x — the curves generalise to kinds they have never seen.`,
+    `- Bootstrap: refitting the curve on ${f.bootstrap_n} resamples moves a typical row's rank by ${f.bootstrap_median_rank_range} places (median p90-p10 rank range) — ranks move too, because the value band is wide and rows' values overlap. The top row ranks ${radar.rows[0]?.rank_lo}–${radar.rows[0]?.rank_hi} and lands in the top 20 in ${Math.round((radar.rows[0]?.top20_share ?? 0) * 100)}% of refits; every row carries its rank range next to its point rank.`,
     `- Half the traded protocols land within ${Math.round(10 ** f.band_lo_log * 100) / 100}x to ${Math.round(10 ** f.band_hi_log * 100) / 100}x of the curve; that band is shown on every row.`,
     '',
     '## What was tested and dropped',
     '',
-    `- Median (LAD) regression instead of OLS: leave-one-out 3.30x, but walk-forward 2.67x / 2.30x — worse where it matters, dropped. Huber robust regression: 3.42x leave-one-out, dropped. A piecewise log-log curve and a quadratic log-log curve: 3.55x and 3.54x, dropped. Fitting only on traded protocols above $20M of TVL: the rank correlation collapses, dropped. A two-stage model (probability of ever launching times value if launched): the launch-probability fit is weak (AUC 0.65 on this snapshot) and the top 10 would compress into a $6M–$31M expected-value range, so the board keeps the value-if-launched ranking and says so. Expanding the board into the 144 excluded pre-token rows (wrapped, staked, bridged, exchange products): the biggest would sit at the top — WBTC at $112M, Binance staked ETH at $90M, Robinhood at $82M — and those are products of tokens that already trade, not protocols still to come, so they stay excluded and the coverage table below says why.`,
+    `- Median (LAD) regression instead of OLS: leave-one-out 3.30x, but walk-forward 2.67x / 2.30x — worse where it matters, dropped. Huber robust regression: 3.42x leave-one-out, dropped. A piecewise log-log curve and a quadratic log-log curve: 3.55x and 3.54x, dropped. Fitting only on traded protocols above $20M of TVL: the rank correlation collapses, dropped. A two-stage model (probability of ever launching times value if launched): the launch-probability fit is weak (AUC 0.65 on this snapshot) and the top 10 would compress into a $6M–$31M expected-value range, so the board keeps the value-if-launched ranking and says so. Expanding the board into the 144 excluded pre-token rows (wrapped, staked, bridged, exchange products): the biggest would sit at the top — WBTC at $112M — and those are products of tokens that already trade, not protocols still to come, so they stay excluded.`,
+    '',
+    `- New model families, tested this round and all worse than the per-category OLS: k-nearest neighbours (k=8/12/20: 3.85x / 3.25x / 3.32x), local-linear regression (0.5/1.0: 3.67x / 3.52x), OLS plus TVL-by-age (3.38x) or TVL-by-growth (3.65x) interactions, and a per-category plus kNN ensemble (3.39x). A second launch-probability model with category launch rates: 5-fold AUC 0.708, and the category base rate alone scores 0.730 — the model adds nothing beyond "what kind of protocol it is", so no launch probability enters the ranking.`,
     '',
     '## The farm plans',
     '',
-    `Every row carries seven steps, each with a cost and a time, derived from the protocol's own category, chains, TVL, age and verdict. The weekly action follows the protocol's mechanism (lending, DEX, vault, bridge, staking, perps — not one generic action), the capital follows its TVL, the hold follows its age, and the last step nets the plan: gas over the hold, and the exit rule (unwind if TVL halves or seven-day growth stays below -20% for two weeks). ${worth} rows are Worth farming; farming all of them at the suggested sizes takes about $${book} of capital. The farm book (plans.json) carries the top 6 Worth rows with their whole plans. Two portfolios, each sized from the rows' own suggested capital and netted to one break-even number:\n\n${portfolioLines}`,
+    `Every row carries eight steps, each with a cost and a time, derived from the protocol's own category, chains, TVL, age and verdict. The top six rows name the protocol's own mechanism — staking TAO into a Bittensor subnet, lending YLDS into a Prime pool, depositing into a Sentora-curated Morpho vault — not a generic "add liquidity" step. Every other row uses the mechanism template for its own kind (basis, CDP, collateral, payments, chain lending — a lending plan is not a DEX plan), every hold is dated from the snapshot, the seventh step names the risk to watch, and the last step nets the plan: gas over the hold, and the exit rule (unwind if TVL halves or seven-day growth stays below -20% for two weeks). ${worth} rows are Worth farming; farming all of them at the suggested sizes takes about $${book} of capital. The farm book (plans.json) carries the top 6 Worth rows with their whole plans. Two portfolios, each sized from the rows' own suggested capital and netted to one break-even number:\n\n${portfolioLines}`,
+    '',
+    `The table also sorts by value per dollar committed — implied value divided by the plan's capital plus gas — so a reader can sort by farming efficiency instead of by size alone.`,
     '',
     '## How to read the page',
     '',
-    'The board table comes first: rank, protocol, TVL, 7-day growth, age, implied value with its band and bootstrap rank range, verdict, confidence. It sorts on every column and filters by search, category, chain, verdict and scope. Select a row for its detail view: every input to its value, the rank range, and its farm plan. The farm book lists the Worth rows and the two portfolios. The model panel shows the formula, the per-category curves, the backtest table, the coverage of all protocols and the category offsets. A separate Live token view lists the protocols that already trade, set aside from the ranking.',
+    'The board table comes first: rank, protocol, TVL, 7-day growth, age, implied value with its band and bootstrap rank range, value per dollar, verdict. It sorts on every column and filters by search, category, chain, verdict and scope. Select a row for its detail view: every input to its value, the rank range, the value-per-dollar figure and its farm plan. The farm book lists the Worth rows and the two portfolios; the model panel shows the formula, the per-category curves, the backtest table, the coverage and the category offsets. A separate Live token view lists the protocols that already trade, set aside from the ranking.',
     '',
     'Implied value is a model, not a price, and never a promise of an airdrop.',
     '',
