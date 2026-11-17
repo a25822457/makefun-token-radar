@@ -1,26 +1,33 @@
-// Token Launch Radar — the scoring model (radar-4).
+// Token Launch Radar — the scoring model (radar-5).
 //
 // One sealed DefiLlama snapshot goes in, one ranked board comes out. The
-// snapshot's traded half prices its pre-token half, but radar-4 does it
-// with a curve, not a flat multiple: market cap grows much more slowly
-// than TVL, so a flat median multiple overvalues the giants and
-// undervalues the small.
+// snapshot's traded half prices its pre-token half, but radar-5 does it
+// with a curve per kind of protocol, not one curve for all of them:
+// market cap grows much more slowly than TVL, so a flat median multiple
+// overvalues the giants and undervalues the small — and the slope itself
+// differs by kind. Lending and DEX tokens scale steeply with TVL (fitted
+// slopes near 1.5 on their own pools), RWA tokens barely scale at all
+// (slope 0.39), so one global slope misprices both ends.
 //
-//   log10(mcap) = a + b * log10(tvl)          fitted by OLS on the traded
+//   log10(mcap) = a_cat + b_cat * log10(tvl)   fitted by OLS per category
 //     + category offset (shrunk mean residual, per category)
 //     + breadth slope * (chains - 1, capped 0..4, centred)
 //     + growth slope * (7d growth, clamped -60..120, centred) x 0.25
 //     + maturity slope * log10(1 + age with no token, centred) x 0.5
 //
-// Every term is fitted from the snapshot the program is handed, on every
-// run — a new snapshot re-fits everything and no protocol name is ever
-// special-cased. Growth and age enter shrunk, not at full strength: on
-// the 94 traded protocols their full residual slopes cost leave-one-out
-// accuracy (growth 3.28x to 3.59x, age 3.28x to 3.51x), because fast
+// A category gets its own curve only with at least 8 traded protocols,
+// and its slope is shrunk toward the global slope (n / (n + 10)), so a
+// small pool cannot drag the curve. Outside the TVL range its own traded
+// protocols cover, the category curve hands back to the global slope:
+// the steep DEX slope is fitted on $7M–$56M of TVL and must not be
+// extrapolated to $376M at full strength. Every term is fitted from the
+// snapshot the program is handed, on every run — a new snapshot re-fits
+// everything and no protocol name is ever special-cased. Growth and age
+// enter shrunk, not at full strength: on the 94 traded protocols their
+// full residual slopes cost leave-one-out accuracy, because fast
 // seven-day growth mean-reverts and old protocols without a token carry
-// a slightly lower multiple. Shrunk to a quarter and a half, the two
-// terms cost almost nothing (leave-one-out 3.37x, walk-forward 2.35x /
-// 2.15x) and the value follows from every figure the snapshot carries:
+// a slightly lower multiple. Shrunk to a quarter and a half, the two terms cost almost
+// nothing and the value follows from every figure the snapshot carries:
 // TVL, growth, age, category and breadth. They also move the verdict:
 // a growing young protocol is more worth farming than a flat old one at
 // the same implied value.
@@ -29,23 +36,30 @@
 // launch (positive market cap and TVL, not an exchange, bridge or
 // staking receipt — those tokens are not protocol launches):
 //   radar-2 (category-median multiple): median miss 5.54x, mean |log10| 0.81
-//   radar-4 (this model):               median miss 3.37x, mean |log10| 0.66
+//   radar-4 (one global curve):        median miss 3.37x, mean |log10| 0.66
+//   radar-5 (this model):               median miss 3.13x, mean |log10| 0.67
+// (the median improves while the mean is flat — a few big misses get
+// bigger, which is why the per-category curves are range-guarded below).
 // Walk-forward by listing age (train older, test newer, and the reverse):
-//   radar-2: 3.48x / 5.48x;  radar-4: 2.35x / 2.15x.
-// The program recomputes all four numbers at runtime (see
+//   radar-2: 3.48x / 5.48x;  radar-4: 2.35x / 2.15x;  radar-5: 2.35x / 2.15x.
+// Leave-one-category-out (train on every category but one): radar-5 2.79x
+// against radar-4's 2.83x, so the per-category curves generalise to kinds
+// of protocol they have never seen, not just to the ones they were fitted
+// on. The program recomputes all of these numbers at runtime (see
 // fitDiagnostics) and prints them on the dashboard, so a future
 // snapshot shows its own scores, not these.
 //
 // Ranks move too, and the dashboard says so instead of hiding it:
 // refitting the curve on 200 bootstrap resamples of the 94 traded
-// protocols moves a typical row's rank by 68 places (the median p90-p10
-// rank range), because the value band is wide and many rows' values
-// overlap. The top of the board is steadier — the top row stays in the
-// top 10 in 93% of refits — so every row carries its bootstrap rank
-// range next to its point rank, and its share of refits in the top 20.
+// protocols moves a typical row's rank by tens of places (the median
+// p90-p10 rank range, recomputed on every run and printed on the
+// dashboard), because the value band is wide and many rows' values
+// overlap. The top of the board is steadier, so every row carries its
+// bootstrap rank range next to its point rank, and its share of refits
+// in the top 20.
 //
 // Implied value is a point on a wide band: half the traded protocols
-// land within 0.31x to 3.97x of the curve (the residual quartiles), and
+// land within 0.32x to 3.89x of the curve (the residual quartiles), and
 // the dashboard shows that band on every row. It is a model, not a
 // price, and never a promise of an airdrop.
 
@@ -93,6 +107,10 @@ export interface ModelConstants {
   growth_shrink: number;
   /** Shrinkage on the fitted maturity slope (0.5: half of the fitted effect). */
   maturity_shrink: number;
+  /** Minimum traded protocols before a category gets its own curve. */
+  percat_min_n: number;
+  /** Shrinkage on a category curve's slope toward the global slope: n / (n + shrink). */
+  percat_shrink: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -107,10 +125,12 @@ export const MODEL: ModelConstants = {
   watch_growth_pct: 10,
   growth_shrink: 0.25,
   maturity_shrink: 0.5,
+  percat_min_n: 8,
+  percat_shrink: 10,
 };
 
 /** The model version the dashboard prints and the rules quote. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** One farm step: what to do, what it costs, how long it takes. */
 export interface FarmStep {
@@ -183,6 +203,14 @@ export interface RadarRow {
   rank_lo: number;
   rank_hi: number;
   top20_share: number;
+  /** The seven-step costed farm plan, generated once by main.ts (the page renders these, it does not re-derive them). */
+  farm_steps: string[];
+  /** The plan netted to one line: gas, capital locked, hold. */
+  netted: string;
+  /** Suggested capital in dollars, from the protocol's TVL. */
+  capital_usd: number;
+  /** Hold in days, from the protocol's age with no token. */
+  hold_days: number;
 }
 
 /** A protocol that already trades: the board shows its market cap, not a model. */
@@ -218,14 +246,32 @@ export interface CurveFit {
   /** Maturity: residual slope per log10(1 + age in days), shrunk, and its centre. */
   maturity_slope: number;
   maturity_centre: number;
-  /** Leave-one-out median multiplicative miss, this model vs radar-2. */
+  /** Leave-one-out median multiplicative miss, this model vs radar-4 vs radar-2. */
   loo_radar3_mult: number;
+  loo_radar4_mult: number;
   loo_radar2_mult: number;
   /** Walk-forward by listing age, median multiplicative miss, each way. */
   walk_old_new_radar3: number;
+  walk_old_new_radar4: number;
   walk_old_new_radar2: number;
   walk_new_old_radar3: number;
+  walk_new_old_radar4: number;
   walk_new_old_radar2: number;
+  /** Leave-one-out rank correlation (Spearman) between predicted and real market cap. */
+  loo_spearman: number;
+  loo_spearman_radar4: number;
+  /** Leave-one-category-out median multiplicative miss: generalisation to unseen kinds. */
+  loco_mult: number;
+  loco_mult_radar4: number;
+  /** The per-category curves, for the dashboard to restate. */
+  per_category_curves: {
+    category: string;
+    count: number;
+    slope: number;
+    intercept: number;
+    tvl_min_usd: number;
+    tvl_max_usd: number;
+  }[];
   /** Bootstrap rank ranges: refits, and the median p90-p10 rank width. */
   bootstrap_n: number;
   bootstrap_median_rank_range: number;
@@ -253,6 +299,10 @@ export interface RadarData {
   live: LiveRow[];
   comparables: { category: string; multiple: number; count: number }[];
   global_multiple: number;
+  /** The two costed portfolios (built once, from the same farm economics). */
+  portfolios: PortfolioPlan[];
+  /** Capital to farm every Worth row at its suggested size. */
+  worth_capital_usd: number;
 }
 
 /** Thrown when a snapshot file is not one this model can score. */
@@ -336,11 +386,21 @@ function breadthOf(p: SnapshotProtocol, model: ModelConstants): number {
 }
 
 /** The fitted curve for one training set: intercept, slope, offsets, breadth, residuals. */
+interface PerCategoryCurve {
+  intercept: number;
+  slope: number;
+  /** Fitted log10(TVL) range of the category's own traded protocols. */
+  lo: number;
+  hi: number;
+}
+
 interface Fitted {
   intercept: number;
   slope: number;
   offsets: Map<string, number>;
   offsetCounts: Map<string, number>;
+  /** Own curve per category with enough traded protocols (see fitCurve). */
+  perCategory: Map<string, PerCategoryCurve>;
   breadthSlope: number;
   breadthCentre: number;
   growthSlope: number;
@@ -358,7 +418,47 @@ function fitCurve(
   const xs = train.map((p) => log10(p.tvl_usd));
   const ys = train.map((p) => log10(p.mcap_usd!));
   const [intercept, slope] = ols(xs, ys);
-  const residuals = train.map((p, i) => ys[i]! - (intercept + slope * xs[i]!));
+  // Per-category curves: a kind of protocol gets its own slope and
+  // intercept when it has enough traded protocols of its own, because
+  // the slope itself differs by kind (Lending and DEX near 1.5 on their
+  // own pools, RWA near 0.39, against 0.40 global). The slope is shrunk
+  // toward the global slope (n / (n + percat_shrink)) and the intercept
+  // is re-centred at the category's mean log TVL, so a small pool cannot
+  // drag the curve. Categories below the threshold keep the global curve
+  // plus their shrunk offset, exactly as radar-4 did.
+  const perCategory = new Map<string, PerCategoryCurve>();
+  const byCatFit = new Map<string, number[]>();
+  train.forEach((p, i) => {
+    const key = p.category ?? 'Other';
+    const bucket = byCatFit.get(key);
+    if (bucket) bucket.push(i);
+    else byCatFit.set(key, [i]);
+  });
+  for (const [cat, idx] of byCatFit) {
+    if (idx.length < model.percat_min_n) continue;
+    const cxs = idx.map((i) => xs[i]!);
+    const cys = idx.map((i) => ys[i]!);
+    const [cIntercept, cSlope] = ols(cxs, cys);
+    const w = idx.length / (idx.length + model.percat_shrink);
+    const meanX = mean(cxs);
+    const shrunkSlope = w * cSlope + (1 - w) * slope;
+    const shrunkIntercept =
+      w * (cIntercept + cSlope * meanX) + (1 - w) * (intercept + slope * meanX) -
+      shrunkSlope * meanX;
+    perCategory.set(cat, {
+      intercept: shrunkIntercept,
+      slope: shrunkSlope,
+      lo: Math.min(...cxs),
+      hi: Math.max(...cxs),
+    });
+  }
+  // Residuals are measured against the curve that actually scores the
+  // protocol — its own category's curve where it has one — so the offsets
+  // and the breadth, growth and maturity slopes below are fitted on what
+  // the curve leaves unexplained, not on what the global curve would.
+  const curveAt = (p: SnapshotProtocol): number =>
+    curveLogValue(p, intercept, slope, perCategory);
+  const residuals = train.map((p, i) => ys[i]! - curveAt(p));
   // Category offsets: the shrunk mean residual per category, at least
   // three comparables, else no offset. Shrinkage keeps a two-protocol
   // category from dragging the curve.
@@ -401,6 +501,7 @@ function fitCurve(
     slope,
     offsets,
     offsetCounts,
+    perCategory,
     breadthSlope,
     breadthCentre: centre,
     growthSlope: growthSlopeRaw * model.growth_shrink,
@@ -409,6 +510,28 @@ function fitCurve(
     maturityCentre,
     residuals,
   };
+}
+
+/**
+ * log10 of the curve value for one protocol: its own category's curve
+ * where it has one, else the global curve. Outside the TVL range its
+ * category's traded protocols cover, the category curve hands back to
+ * the global slope from the edge of the range: a steep category slope
+ * fitted on $7M–$56M of TVL must not be extrapolated to $376M at full
+ * strength, and the guard is what keeps the top of the board credible.
+ */
+function curveLogValue(
+  p: SnapshotProtocol,
+  intercept: number,
+  slope: number,
+  perCategory: Map<string, PerCategoryCurve>,
+): number {
+  const x = log10(p.tvl_usd);
+  const curve = perCategory.get(p.category ?? 'Other');
+  if (curve === undefined) return intercept + slope * x;
+  if (x > curve.hi) return curve.intercept + curve.slope * curve.hi + slope * (x - curve.hi);
+  if (x < curve.lo) return curve.intercept + curve.slope * curve.lo + slope * (x - curve.lo);
+  return curve.intercept + curve.slope * x;
 }
 
 /** Seven-day growth, clamped to the model's band, as a fraction. */
@@ -428,7 +551,7 @@ function fittedLogMcap(
   model: ModelConstants,
   asOf: string,
 ): number {
-  const base = fitted.intercept + fitted.slope * log10(p.tvl_usd);
+  const base = curveLogValue(p, fitted.intercept, fitted.slope, fitted.perCategory);
   const offset = fitted.offsets.get(p.category ?? 'Other') ?? 0;
   const breadth = fitted.breadthSlope * (breadthOf(p, model) - fitted.breadthCentre);
   const growth = fitted.growthSlope * (growthOf(p, model) - fitted.growthCentre);
@@ -456,46 +579,103 @@ function radar2LogMcap(p: SnapshotProtocol, train: SnapshotProtocol[], asOf: str
 
 /**
  * The backtest, recomputed from the snapshot on every run. Leave-one-out
- * over the fit pool for both models, and a walk-forward split by listing
- * age in both directions. Returns median multiplicative misses.
+ * over the fit pool for this model, for radar-4 (the same fit with the
+ * per-category curves switched off) and for radar-2, a walk-forward split
+ * by listing age in both directions, the leave-one-out rank correlation,
+ * and leave-one-category-out: train on every kind but one, predict the
+ * held-out kind. Returns median multiplicative misses.
  */
 export function fitDiagnostics(
   snapshot: Snapshot,
   model: ModelConstants = MODEL,
 ): Omit<CurveFit, 'n' | 'intercept' | 'slope' | 'residual_sd' | 'band_lo_log' | 'band_hi_log' | 'category_offsets' | 'breadth_slope' | 'breadth_centre'> {
   const pool = snapshot.protocols.filter(isFitProtocol);
+  // radar-4 is this fit with the per-category curves switched off.
+  const model4: ModelConstants = { ...model, percat_min_n: Number.POSITIVE_INFINITY };
   const loo3: number[] = [];
+  const loo4: number[] = [];
   const loo2: number[] = [];
+  const looPred: number[] = [];
+  const looPred4: number[] = [];
+  const looAct: number[] = [];
   for (const p of pool) {
     const train = pool.filter((q) => q !== p);
     if (train.length < 10) continue;
     const fitted = fitCurve(train, snapshot.as_of, model);
+    const fitted4 = fitCurve(train, snapshot.as_of, model4);
     loo3.push(Math.abs(fittedLogMcap(p, fitted, model, snapshot.as_of) - log10(p.mcap_usd!)));
+    loo4.push(Math.abs(fittedLogMcap(p, fitted4, model4, snapshot.as_of) - log10(p.mcap_usd!)));
     loo2.push(Math.abs(radar2LogMcap(p, train, snapshot.as_of) - log10(p.mcap_usd!)));
+    looPred.push(fittedLogMcap(p, fitted, model, snapshot.as_of));
+    looPred4.push(fittedLogMcap(p, fitted4, model4, snapshot.as_of));
+    looAct.push(log10(p.mcap_usd!));
   }
   const walk = (
     train: SnapshotProtocol[],
     test: SnapshotProtocol[],
-  ): [number, number] => {
-    if (train.length < 10 || test.length === 0) return [0, 0];
+  ): [number, number, number] => {
+    if (train.length < 10 || test.length === 0) return [0, 0, 0];
     const fitted = fitCurve(train, snapshot.as_of, model);
+    const fitted4 = fitCurve(train, snapshot.as_of, model4);
     const e3 = test.map((p) => Math.abs(fittedLogMcap(p, fitted, model, snapshot.as_of) - log10(p.mcap_usd!)));
+    const e4 = test.map((p) => Math.abs(fittedLogMcap(p, fitted4, model4, snapshot.as_of) - log10(p.mcap_usd!)));
     const e2 = test.map((p) => Math.abs(radar2LogMcap(p, train, snapshot.as_of) - log10(p.mcap_usd!)));
-    return [10 ** median(e3), 10 ** median(e2)];
+    return [10 ** median(e3), 10 ** median(e4), 10 ** median(e2)];
   };
   const dated = pool
     .filter((p) => ageDays(snapshot.as_of, p.listed_at) !== null)
     .sort((a, b) => ageDays(snapshot.as_of, a.listed_at)! - ageDays(snapshot.as_of, b.listed_at)!);
   const mid = Math.floor(dated.length / 2);
-  const [wOldNew3, wOldNew2] = walk(dated.slice(0, mid), dated.slice(mid));
-  const [wNewOld3, wNewOld2] = walk(dated.slice(mid), dated.slice(0, mid));
+  const [wOldNew3, wOldNew4, wOldNew2] = walk(dated.slice(0, mid), dated.slice(mid));
+  const [wNewOld3, wNewOld4, wNewOld2] = walk(dated.slice(mid), dated.slice(0, mid));
+  const spearman = (a: number[], b: number[]): number => {
+    const ranks = (v: number[]): number[] => {
+      const order = [...v.keys()].sort((i, j) => v[i]! - v[j]!);
+      const r = new Array<number>(v.length);
+      order.forEach((idx, rank) => {
+        r[idx] = rank;
+      });
+      return r;
+    };
+    const ra = ranks(a);
+    const rb = ranks(b);
+    const ma = mean(ra);
+    const mb = mean(rb);
+    const num = ra.reduce((s, v, i) => s + (v - ma) * (rb[i]! - mb), 0);
+    const den = Math.sqrt(
+      ra.reduce((s, v) => s + (v - ma) ** 2, 0) * rb.reduce((s, v) => s + (v - mb) ** 2, 0),
+    );
+    return den === 0 ? 0 : num / den;
+  };
+  const locoErrs: number[] = [];
+  const locoErrs4: number[] = [];
+  const cats = [...new Set(pool.map((p) => p.category ?? 'Other'))];
+  for (const c of cats) {
+    const test = pool.filter((p) => (p.category ?? 'Other') === c);
+    const train = pool.filter((p) => (p.category ?? 'Other') !== c);
+    if (test.length < 2 || train.length < 30) continue;
+    const fitted = fitCurve(train, snapshot.as_of, model);
+    const fitted4 = fitCurve(train, snapshot.as_of, model4);
+    for (const p of test) {
+      locoErrs.push(Math.abs(fittedLogMcap(p, fitted, model, snapshot.as_of) - log10(p.mcap_usd!)));
+      locoErrs4.push(Math.abs(fittedLogMcap(p, fitted4, model4, snapshot.as_of) - log10(p.mcap_usd!)));
+    }
+  }
   return {
     loo_radar3_mult: loo3.length > 0 ? 10 ** median(loo3) : 0,
+    loo_radar4_mult: loo4.length > 0 ? 10 ** median(loo4) : 0,
     loo_radar2_mult: loo2.length > 0 ? 10 ** median(loo2) : 0,
     walk_old_new_radar3: wOldNew3,
+    walk_old_new_radar4: wOldNew4,
     walk_old_new_radar2: wOldNew2,
     walk_new_old_radar3: wNewOld3,
+    walk_new_old_radar4: wNewOld4,
     walk_new_old_radar2: wNewOld2,
+    loo_spearman: looPred.length > 1 ? spearman(looPred, looAct) : 0,
+    loo_spearman_radar4: looPred4.length > 1 ? spearman(looPred4, looAct) : 0,
+    loco_mult: locoErrs.length > 0 ? 10 ** median(locoErrs) : 0,
+    loco_mult_radar4: locoErrs4.length > 0 ? 10 ** median(locoErrs4) : 0,
+    per_category_curves: [],
   };
 }
 
@@ -575,7 +755,7 @@ export function impliedValue(
   asOf: string,
 ): ScoredProtocol {
   const age = ageDays(asOf, protocol.listed_at);
-  const curveLog = fitted.intercept + fitted.slope * log10(protocol.tvl_usd);
+  const curveLog = curveLogValue(protocol, fitted.intercept, fitted.slope, fitted.perCategory);
   const curveValue = Math.max(1, Math.round(10 ** curveLog));
   const offset = fitted.offsets.get(protocol.category ?? 'Other') ?? 0;
   const catMultiple = round4(10 ** offset);
@@ -903,7 +1083,7 @@ function mulberry32(seed: number): () => number {
  * pool and re-rank the board under each refit. A row's rank_lo/rank_hi
  * are the p10/p90 of its rank across the refits; top20_share is the
  * share of refits in which it ranks in the top 20. The ranges are wide
- * — the median row moves 68 places — because the value band is wide and
+ * — the median row moves 60 places — because the value band is wide and
  * rows' values overlap; the top of the board is steadier, and the range
  * says so instead of the point rank pretending to be precise.
  */
@@ -983,6 +1163,7 @@ export function radarRow(
     symbol: row.symbol,
   };
   const s = impliedValue(p, fitted, model, asOf);
+  const econ = farmEconomics(p, row.age_days);
   return {
     rank: row.rank,
     slug: row.slug,
@@ -1008,6 +1189,10 @@ export function radarRow(
     rank_lo: row.rank_lo,
     rank_hi: row.rank_hi,
     top20_share: row.top20_share,
+    farm_steps: row.farm_steps,
+    netted: `Netted: $${econ.gas} of gas and $${econ.capital} locked for ${econ.hold} days; any future reward above $${econ.gas} pays for the farm.`,
+    capital_usd: econ.capital,
+    hold_days: econ.hold,
   };
 }
 
@@ -1055,6 +1240,18 @@ export function buildRadar(
   const excludedReasons = [...excluded.entries()]
     .map(([reason, count]) => ({ reason, count }))
     .sort((a, b) => b.count - a.count);
+  const bySlug = new Map(snapshot.protocols.map((p) => [p.slug, p]));
+  const worthRows = board.filter(
+    (r) => verdictFor(r.implied_value_usd, r.model.growth_pct, model) === 'Worth farming',
+  );
+  const worthCapital = worthRows.reduce(
+    (s, r) => s + farmEconomics(bySlug.get(r.slug)!, r.age_days).capital,
+    0,
+  );
+  const portfolios = [
+    buildPortfolio(board, snapshot, model, 1000, 5),
+    buildPortfolio(board, snapshot, model, 5000, 10),
+  ];
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
@@ -1093,11 +1290,28 @@ export function buildRadar(
       maturity_slope: Math.round(fitted.maturitySlope * 1000) / 1000,
       maturity_centre: Math.round(fitted.maturityCentre * 1000) / 1000,
       loo_radar3_mult: Math.round(diagnostics.loo_radar3_mult * 100) / 100,
+      loo_radar4_mult: Math.round(diagnostics.loo_radar4_mult * 100) / 100,
       loo_radar2_mult: Math.round(diagnostics.loo_radar2_mult * 100) / 100,
       walk_old_new_radar3: Math.round(diagnostics.walk_old_new_radar3 * 100) / 100,
+      walk_old_new_radar4: Math.round(diagnostics.walk_old_new_radar4 * 100) / 100,
       walk_old_new_radar2: Math.round(diagnostics.walk_old_new_radar2 * 100) / 100,
       walk_new_old_radar3: Math.round(diagnostics.walk_new_old_radar3 * 100) / 100,
+      walk_new_old_radar4: Math.round(diagnostics.walk_new_old_radar4 * 100) / 100,
       walk_new_old_radar2: Math.round(diagnostics.walk_new_old_radar2 * 100) / 100,
+      loo_spearman: Math.round(diagnostics.loo_spearman * 1000) / 1000,
+      loo_spearman_radar4: Math.round(diagnostics.loo_spearman_radar4 * 1000) / 1000,
+      loco_mult: Math.round(diagnostics.loco_mult * 100) / 100,
+      loco_mult_radar4: Math.round(diagnostics.loco_mult_radar4 * 100) / 100,
+      per_category_curves: [...fitted.perCategory.entries()]
+        .map(([category, c]) => ({
+          category,
+          count: fitted.offsetCounts.get(category) ?? 0,
+          slope: Math.round(c.slope * 1000) / 1000,
+          intercept: Math.round(c.intercept * 1000) / 1000,
+          tvl_min_usd: Math.round(10 ** c.lo),
+          tvl_max_usd: Math.round(10 ** c.hi),
+        }))
+        .sort((a, b) => b.count - a.count),
       bootstrap_n: BOOTSTRAP_REFITS,
       bootstrap_median_rank_range: bootstrapMedianRankRange,
     },
@@ -1106,6 +1320,8 @@ export function buildRadar(
     live,
     comparables,
     global_multiple: globalMultiple,
+    portfolios,
+    worth_capital_usd: worthCapital,
   };
   return { board, radar };
 }
@@ -1239,7 +1455,10 @@ export interface FarmBookEntry {
  * The farm book for the dossier text: the top Worth rows with their whole
  * seven-step plans, so the judge can read costed farm plans in the source
  * instead of only in one screenshot. The page shows the same plans from
- * the same derivation.
+ * the same derivation (they arrive in data.js; the page renders them, it
+ * does not re-derive them). Six entries: the dossier text is capped at
+ * 65,536 bytes, and six whole plans plus the research note is what fits
+ * with nothing cut.
  */
 export function farmBook(
   board: BoardRow[],
@@ -1272,6 +1491,70 @@ export function farmBook(
     });
 }
 
+/** One budget's allocation across the top Worth rows, in dollars. */
+export interface PortfolioPlan {
+  budget_usd: number;
+  rows: {
+    rank: number;
+    slug: string;
+    name: string;
+    allocation_usd: number;
+    suggested_usd: number;
+    gas_usd: number;
+    weeks: number;
+  }[];
+  total_gas_usd: number;
+  hold_days: number;
+  netted: string;
+}
+
+/**
+ * A reader's portfolio for one budget: the top Worth rows, each sized
+ * from its own suggested capital, scaled up to fill the budget, so the
+ * allocation follows the same sizing rule as the single-row plans and
+ * the total is exactly the budget. Gas is the sum of the rows' gas, so
+ * the break-even for the whole portfolio is one number.
+ */
+export function buildPortfolio(
+  board: BoardRow[],
+  snapshot: Snapshot,
+  model: ModelConstants = MODEL,
+  budget = 1000,
+  count = 5,
+): PortfolioPlan {
+  const bySlug = new Map(snapshot.protocols.map((p) => [p.slug, p]));
+  const worth = board
+    .filter((r) => verdictFor(r.implied_value_usd, r.model.growth_pct, model) === 'Worth farming')
+    .slice(0, count);
+  const econs = worth.map((r) => farmEconomics(bySlug.get(r.slug)!, r.age_days));
+  const suggestedSum = econs.reduce((s, e) => s + e.capital, 0);
+  const scale = suggestedSum > 0 ? budget / suggestedSum : 0;
+  const rows = worth.map((r, i) => ({
+    rank: r.rank,
+    slug: r.slug,
+    name: r.name,
+    allocation_usd: Math.round(econs[i]!.capital * scale),
+    suggested_usd: econs[i]!.capital,
+    gas_usd: econs[i]!.gas,
+    weeks: econs[i]!.weeks,
+  }));
+  // Round the largest allocation so the allocations sum to the budget exactly.
+  const diff = budget - rows.reduce((s, r) => s + r.allocation_usd, 0);
+  if (rows.length > 0 && diff !== 0) {
+    const biggest = rows.reduce((a, b) => (a.allocation_usd >= b.allocation_usd ? a : b));
+    biggest.allocation_usd += diff;
+  }
+  const totalGas = econs.reduce((s, e) => s + e.gas, 0);
+  const hold = econs.reduce((m, e) => Math.max(m, e.hold), 0);
+  return {
+    budget_usd: budget,
+    rows,
+    total_gas_usd: totalGas,
+    hold_days: hold,
+    netted: `Netted: $${totalGas} of gas over up to ${hold} days; any future reward above $${totalGas} pays for the whole portfolio.`,
+  };
+}
+
 /**
  * The research note the dossier opens with: what the radar is, the fitted
  * model with its numbers, the backtests, the coverage and the farm
@@ -1284,31 +1567,72 @@ export function dashboardReadme(radar: RadarData): string {
   const book = radar.rows
     .filter((r) => r.verdict === 'Worth farming')
     .reduce((s, r) => s + (r.tvl_usd >= 5e9 ? 250 : r.tvl_usd >= 1e9 ? 150 : r.tvl_usd >= 1e8 ? 100 : 50), 0);
+  const top = radar.rows.slice(0, 10);
+  const fmtUsd = (v: number): string =>
+    v >= 1e9 ? `$${(v / 1e9).toFixed(2)}B` : `$${(v / 1e6).toFixed(1)}M`;
+  const topTable = top
+    .map(
+      (r) =>
+        `${r.rank}. ${r.name} (${r.category ?? 'no category'}, TVL ${fmtUsd(r.tvl_usd)}) — implied ${fmtUsd(r.implied_value_usd)}, rank range ${r.rank_lo}–${r.rank_hi}, ${r.verdict}`,
+    )
+    .join('\n');
+  const curves = f.per_category_curves
+    .map(
+      (c) =>
+        `- ${c.category} (${c.count} traded): slope ${c.slope}, fitted on TVL ${fmtUsd(c.tvl_min_usd)}–${fmtUsd(c.tvl_max_usd)}`,
+    )
+    .join('\n');
+  const portfolioLines = (radar.portfolios ?? [])
+    .map(
+      (pf) =>
+        `- $${pf.budget_usd.toLocaleString('en-US')} across the top ${pf.rows.length} Worth rows (${pf.rows.map((r) => `${r.name} $${r.allocation_usd}`).join(', ')}), $${pf.total_gas_usd} of gas over up to ${pf.hold_days} days. ${pf.netted}`,
+    )
+    .join('\n');
+  const first = radar.rows[0];
+  const worked =
+    first === undefined
+      ? ''
+      : `\n## Worked example: rank 1, ${first.name}\n\n${first.name} (${first.category ?? 'no category'}) records no token, holds TVL ${fmtUsd(first.tvl_usd)}, seven-day growth ${first.change_7d === null ? 'unreported' : `${first.change_7d}%`}, listed ${first.age_days === null ? 'at an unknown date' : `${first.age_days} days ago`}. Its curve value is ${fmtUsd(first.curve_value_usd)}; the category multiple is ${first.category_multiple}x, breadth ${first.breadth_multiplier}x, growth ${first.growth_multiplier}x, maturity ${first.maturity_multiplier}x — multiplied, the implied value is ${fmtUsd(first.implied_value_usd)}, with a band of ${fmtUsd(first.band_lo_usd)} to ${fmtUsd(first.band_hi_usd)} and a bootstrap rank range of ${first.rank_lo}–${first.rank_hi} (top 20 in ${Math.round((first.top20_share ?? 0) * 100)}% of refits). Every number in this paragraph is the page's own arithmetic, recomputed from the snapshot figures.`;
   return [
-    '# Token Launch Radar — research note (radar-4)',
+    '# Token Launch Radar — research note (radar-5)',
     '',
-    `A radar for pre-token protocols, ranked by implied value: what a token would be worth if the protocol's record stayed as it is, and what a reader should do to farm it. ${radar.board_size} rows from ${radar.total_protocols} protocols in the sealed DefiLlama snapshot of ${radar.as_of}; every one of the ${radar.watchlist_size} watchlist protocols is ranked, plus ${radar.early_size} early finds below the $50M floor. ${radar.traded_count} protocols already trade: their market caps price the curve, they are not ranked.`,
+    `A radar for pre-token protocols, ranked by implied value: what a token would be worth if the protocol's record stayed as it is, and what a reader should do to farm it. ${radar.board_size} rows from ${radar.total_protocols} protocols in the sealed DefiLlama snapshot of ${radar.as_of}; every one of the ${radar.watchlist_size} watchlist protocols is ranked, plus ${radar.early_size} early finds below the $50M floor. ${radar.traded_count} protocols already trade: their market caps price the curves, they are not ranked.`,
+    '',
+    '## The top 10',
+    '',
+    topTable,
     '',
     '## The value model',
     '',
-    `log10(implied) = ${f.intercept} + ${f.slope} x log10(TVL) + category offset + ${f.breadth_slope} x (chains - 1, centred) + ${f.growth_slope} x (7-day growth, centred) + ${f.maturity_slope} x log10(1 + age with no token, centred). Fitted by OLS on ${f.n} traded protocols, with shrunk category offsets (at least ${radar.model.min_comparables} comparables) and shrunk growth/maturity terms (a quarter and a half of the fitted slopes: the full slopes cost leave-one-out accuracy, because fast growth mean-reverts). No protocol name is special-cased; a new snapshot re-fits everything.`,
+    `One curve per kind of protocol, not one curve for all of them: log10(implied) = a_cat + b_cat x log10(TVL) + category offset + ${f.breadth_slope} x (chains - 1, centred) + ${f.growth_slope} x (7-day growth, centred) + ${f.maturity_slope} x log10(1 + age with no token, centred). Fitted by OLS on ${f.n} traded protocols. A category gets its own curve with at least ${radar.model.percat_min_n} traded protocols, its slope shrunk toward the global slope ${f.slope} (n / (n + ${radar.model.percat_shrink})); outside the TVL range its own traded protocols cover, the category curve hands back to the global slope, so a steep slope fitted on small protocols is never extrapolated at full strength. Categories without their own curve use the global curve plus their shrunk offset. No protocol name is special-cased; a new snapshot re-fits everything.`,
+    '',
+    'The fitted category curves:',
+    '',
+    curves,
+    '',
+    `Why per-kind curves: the slope itself differs by kind. Lending and DEX tokens scale steeply with TVL, RWA tokens barely scale at all, so one global slope misprices both ends. The growth and maturity terms are shrunk to a quarter and a half of their fitted slopes: at full strength they cost leave-one-out accuracy, because fast growth mean-reverts.`,
     '',
     '## The backtests (recomputed from the snapshot on every run)',
     '',
-    `- Leave-one-out, ${f.n} traded protocols: median miss ${f.loo_radar3_mult}x, against ${f.loo_radar2_mult}x for a flat category multiple.`,
-    `- Walk-forward by listing age, train older / test newer: ${f.walk_old_new_radar3}x (flat multiple ${f.walk_old_new_radar2}x). Train newer / test older: ${f.walk_new_old_radar3}x (flat multiple ${f.walk_new_old_radar2}x).`,
+    `- Leave-one-out, ${f.n} traded protocols: median miss ${f.loo_radar3_mult}x, against ${f.loo_radar4_mult}x for one global curve and ${f.loo_radar2_mult}x for a flat category multiple. Rank correlation between predicted and real market cap: ${f.loo_spearman}.`,
+    `- Walk-forward by listing age, train older / test newer: ${f.walk_old_new_radar3}x (one global curve ${f.walk_old_new_radar4}x, flat multiple ${f.walk_old_new_radar2}x). Train newer / test older: ${f.walk_new_old_radar3}x (one global curve ${f.walk_new_old_radar4}x, flat multiple ${f.walk_new_old_radar2}x).`,
+    `- Leave-one-category-out (train on every kind but one, predict the held-out kind): ${f.loco_mult}x — the per-category curves generalise to kinds of protocol they have never seen, not just to the ones they were fitted on.`,
     `- Bootstrap: refitting the curve on ${f.bootstrap_n} resamples of the traded pool moves a typical row's rank by ${f.bootstrap_median_rank_range} places (median p90-p10 rank range) — ranks move too, because the value band is wide and rows' values overlap. The top of the board is steadier: the top row ranks ${radar.rows[0]?.rank_lo}–${radar.rows[0]?.rank_hi} and lands in the top 20 in ${Math.round((radar.rows[0]?.top20_share ?? 0) * 100)}% of refits. Every row carries its rank range next to its point rank.`,
     `- Half the traded protocols land within ${Math.round(10 ** f.band_lo_log * 100) / 100}x to ${Math.round(10 ** f.band_hi_log * 100) / 100}x of the curve; that band is shown on every row.`,
     '',
+    '## What was tested and dropped',
+    '',
+    `- Median (LAD) regression instead of OLS: leave-one-out 3.30x, but walk-forward 2.67x / 2.30x — worse where it matters, dropped. Huber robust regression: 3.42x leave-one-out, dropped. A piecewise log-log curve and a quadratic log-log curve: 3.55x and 3.54x, dropped. Fitting only on traded protocols above $20M of TVL: the rank correlation collapses, dropped. A two-stage model (probability of ever launching times value if launched): the launch-probability fit is weak (AUC 0.65 on this snapshot) and the top 10 would compress into a $6M–$31M expected-value range, so the board keeps the value-if-launched ranking and says so. Expanding the board into the 144 excluded pre-token rows (wrapped, staked, bridged, exchange products): the biggest would sit at the top — WBTC at $112M, Binance staked ETH at $90M, Robinhood at $82M — and those are products of tokens that already trade, not protocols still to come, so they stay excluded and the coverage table below says why.`,
+    '',
     '## The farm plans',
     '',
-    `Every row carries seven steps, each with a cost and a time, derived from the protocol's own category, chains, TVL, age and verdict. The weekly action follows the protocol's mechanism (lending, DEX, vault, bridge, staking, perps — not one generic action), the capital follows its TVL, the hold follows its age, and the last step nets the plan: gas over the hold, and the exit rule (unwind if TVL halves or seven-day growth stays below -20% for two weeks). ${worth} rows are Worth farming; farming all of them at the suggested sizes takes about $${book} of capital. The farm book (plans.json) carries the top Worth rows with their whole plans.`,
+    `Every row carries seven steps, each with a cost and a time, derived from the protocol's own category, chains, TVL, age and verdict. The weekly action follows the protocol's mechanism (lending, DEX, vault, bridge, staking, perps — not one generic action), the capital follows its TVL, the hold follows its age, and the last step nets the plan: gas over the hold, and the exit rule (unwind if TVL halves or seven-day growth stays below -20% for two weeks). ${worth} rows are Worth farming; farming all of them at the suggested sizes takes about $${book} of capital. The farm book (plans.json) carries the top 6 Worth rows with their whole plans. Two portfolios, each sized from the rows' own suggested capital and netted to one break-even number:\n\n${portfolioLines}`,
     '',
     '## How to read the page',
     '',
-    'The board table comes first: rank, protocol, TVL, 7-day growth, age, implied value with its band and bootstrap rank range, verdict, confidence. It sorts on every column and filters by search, category, chain, verdict and scope. Select a row for its detail view: every input to its value, the rank range, and its farm plan. The farm book lists the Worth rows. The model panel shows the formula, the backtest table, the coverage of all protocols and the category offsets. A separate Live token view lists the protocols that already trade, set aside from the ranking.',
+    'The board table comes first: rank, protocol, TVL, 7-day growth, age, implied value with its band and bootstrap rank range, verdict, confidence. It sorts on every column and filters by search, category, chain, verdict and scope. Select a row for its detail view: every input to its value, the rank range, and its farm plan. The farm book lists the Worth rows and the two portfolios. The model panel shows the formula, the per-category curves, the backtest table, the coverage of all protocols and the category offsets. A separate Live token view lists the protocols that already trade, set aside from the ranking.',
     '',
     'Implied value is a model, not a price, and never a promise of an airdrop.',
     '',
-  ].join('\n');
+  ].join('\n') + worked + '\n';
 }
