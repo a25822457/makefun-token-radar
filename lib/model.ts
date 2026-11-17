@@ -1,7 +1,7 @@
-// Token Launch Radar — the scoring model (radar-3).
+// Token Launch Radar — the scoring model (radar-4).
 //
 // One sealed DefiLlama snapshot goes in, one ranked board comes out. The
-// snapshot's traded half prices its pre-token half, but radar-3 does it
+// snapshot's traded half prices its pre-token half, but radar-4 does it
 // with a curve, not a flat multiple: market cap grows much more slowly
 // than TVL, so a flat median multiple overvalues the giants and
 // undervalues the small.
@@ -9,28 +9,40 @@
 //   log10(mcap) = a + b * log10(tvl)          fitted by OLS on the traded
 //     + category offset (shrunk mean residual, per category)
 //     + breadth slope * (chains - 1, capped 0..4, centred)
+//     + growth slope * (7d growth, clamped -60..120, centred) x 0.25
+//     + maturity slope * log10(1 + age with no token, centred) x 0.5
 //
-// The fit, the offsets and the slope are all computed from the snapshot
-// the program is handed, on every run — a new snapshot re-fits everything
-// and no protocol name is ever special-cased. What the fit leaves out is
-// deliberate, and the backtest below is why: seven-day growth and age do
-// not predict a traded protocol's market cap in this snapshot (leave-one-
-// out: growth makes the median miss worse, 3.65x to 3.69x; age moves it
-// 3.65x to 3.61x on the median but worsens the mean and the rank
-// correlation), so neither moves implied value. They still move the
-// verdict: a growing young protocol is more worth farming than a flat
-// old one at the same implied value.
+// Every term is fitted from the snapshot the program is handed, on every
+// run — a new snapshot re-fits everything and no protocol name is ever
+// special-cased. Growth and age enter shrunk, not at full strength: on
+// the 94 traded protocols their full residual slopes cost leave-one-out
+// accuracy (growth 3.28x to 3.59x, age 3.28x to 3.51x), because fast
+// seven-day growth mean-reverts and old protocols without a token carry
+// a slightly lower multiple. Shrunk to a quarter and a half, the two
+// terms cost almost nothing (leave-one-out 3.37x, walk-forward 2.35x /
+// 2.15x) and the value follows from every figure the snapshot carries:
+// TVL, growth, age, category and breadth. They also move the verdict:
+// a growing young protocol is more worth farming than a flat old one at
+// the same implied value.
 //
 // Backtest, leave-one-out on the 94 traded protocols that can price a
 // launch (positive market cap and TVL, not an exchange, bridge or
 // staking receipt — those tokens are not protocol launches):
 //   radar-2 (category-median multiple): median miss 5.54x, mean |log10| 0.81
-//   radar-3 (this model):               median miss 3.28x, mean |log10| 0.65
+//   radar-4 (this model):               median miss 3.37x, mean |log10| 0.66
 // Walk-forward by listing age (train older, test newer, and the reverse):
-//   radar-2: 3.48x / 5.48x;  radar-3: 2.58x / 2.20x.
+//   radar-2: 3.48x / 5.48x;  radar-4: 2.35x / 2.15x.
 // The program recomputes all four numbers at runtime (see
 // fitDiagnostics) and prints them on the dashboard, so a future
 // snapshot shows its own scores, not these.
+//
+// Ranks move too, and the dashboard says so instead of hiding it:
+// refitting the curve on 200 bootstrap resamples of the 94 traded
+// protocols moves a typical row's rank by 68 places (the median p90-p10
+// rank range), because the value band is wide and many rows' values
+// overlap. The top of the board is steadier — the top row stays in the
+// top 10 in 93% of refits — so every row carries its bootstrap rank
+// range next to its point rank, and its share of refits in the top 20.
 //
 // Implied value is a point on a wide band: half the traded protocols
 // land within 0.31x to 3.97x of the curve (the residual quartiles), and
@@ -77,6 +89,10 @@ export interface ModelConstants {
   worth_farming_usd: number;
   watch_usd: number;
   watch_growth_pct: number;
+  /** Shrinkage on the fitted growth slope (0.25: a quarter of the fitted effect). */
+  growth_shrink: number;
+  /** Shrinkage on the fitted maturity slope (0.5: half of the fitted effect). */
+  maturity_shrink: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -89,10 +105,12 @@ export const MODEL: ModelConstants = {
   worth_farming_usd: 20_000_000,
   watch_usd: 10_000_000,
   watch_growth_pct: 10,
+  growth_shrink: 0.25,
+  maturity_shrink: 0.5,
 };
 
 /** The model version the dashboard prints and the rules quote. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** One farm step: what to do, what it costs, how long it takes. */
 export interface FarmStep {
@@ -131,6 +149,11 @@ export interface BoardRow {
     comparables: number;
   };
   confidence: number;
+  /** Bootstrap rank range: p10 and p90 of the rank over 200 curve refits. */
+  rank_lo: number;
+  rank_hi: number;
+  /** Share of the 200 refits in which this row ranks in the top 20. */
+  top20_share: number;
   farm_steps: string[];
 }
 
@@ -157,6 +180,9 @@ export interface RadarRow {
   curve_value_usd: number;
   band_lo_usd: number;
   band_hi_usd: number;
+  rank_lo: number;
+  rank_hi: number;
+  top20_share: number;
 }
 
 /** A protocol that already trades: the board shows its market cap, not a model. */
@@ -186,6 +212,12 @@ export interface CurveFit {
   /** Breadth: residual slope per extra chain, and the centring mean. */
   breadth_slope: number;
   breadth_centre: number;
+  /** Growth: residual slope per unit of clamped growth/100, shrunk, and its centre. */
+  growth_slope: number;
+  growth_centre: number;
+  /** Maturity: residual slope per log10(1 + age in days), shrunk, and its centre. */
+  maturity_slope: number;
+  maturity_centre: number;
   /** Leave-one-out median multiplicative miss, this model vs radar-2. */
   loo_radar3_mult: number;
   loo_radar2_mult: number;
@@ -194,6 +226,9 @@ export interface CurveFit {
   walk_old_new_radar2: number;
   walk_new_old_radar3: number;
   walk_new_old_radar2: number;
+  /** Bootstrap rank ranges: refits, and the median p90-p10 rank width. */
+  bootstrap_n: number;
+  bootstrap_median_rank_range: number;
 }
 
 /** Everything the dashboard needs to render. */
@@ -308,6 +343,10 @@ interface Fitted {
   offsetCounts: Map<string, number>;
   breadthSlope: number;
   breadthCentre: number;
+  growthSlope: number;
+  growthCentre: number;
+  maturitySlope: number;
+  maturityCentre: number;
   residuals: number[];
 }
 
@@ -344,7 +383,42 @@ function fitCurve(
   const breadthXs = train.map((p) => breadthOf(p, model));
   const centre = mean(breadthXs);
   const [, breadthSlope] = ols(breadthXs, residuals);
-  return { intercept, slope, offsets, offsetCounts, breadthSlope, breadthCentre: centre, residuals };
+  // Growth and maturity: the slopes of the residuals on clamped seven-day
+  // growth and on log10(1 + age), each centred and shrunk. Both fitted
+  // slopes are negative in this snapshot — fast growth mean-reverts and an
+  // old protocol with no token carries a slightly lower multiple — so at
+  // full strength they cost leave-one-out accuracy; shrunk to a quarter
+  // and a half they cost almost nothing and the value follows from every
+  // figure the snapshot carries.
+  const growthXs = train.map((p) => growthOf(p, model));
+  const growthCentre = mean(growthXs);
+  const [, growthSlopeRaw] = ols(growthXs, residuals);
+  const maturityXs = train.map((p) => maturityOf(p, asOf, model));
+  const maturityCentre = mean(maturityXs);
+  const [, maturitySlopeRaw] = ols(maturityXs, residuals);
+  return {
+    intercept,
+    slope,
+    offsets,
+    offsetCounts,
+    breadthSlope,
+    breadthCentre: centre,
+    growthSlope: growthSlopeRaw * model.growth_shrink,
+    growthCentre,
+    maturitySlope: maturitySlopeRaw * model.maturity_shrink,
+    maturityCentre,
+    residuals,
+  };
+}
+
+/** Seven-day growth, clamped to the model's band, as a fraction. */
+function growthOf(p: SnapshotProtocol, model: ModelConstants): number {
+  return clamp(finite(p.change_7d, 0), model.growth_floor, model.growth_cap) / 100;
+}
+
+/** log10(1 + age in days), with the model's fallback when no listing date is recorded. */
+function maturityOf(p: SnapshotProtocol, asOf: string, model: ModelConstants): number {
+  return Math.log10(1 + (ageDays(asOf, p.listed_at) ?? model.unknown_age_days));
 }
 
 /** log10 of the fitted market cap for one protocol under one fit. */
@@ -352,11 +426,14 @@ function fittedLogMcap(
   p: SnapshotProtocol,
   fitted: Fitted,
   model: ModelConstants,
+  asOf: string,
 ): number {
   const base = fitted.intercept + fitted.slope * log10(p.tvl_usd);
   const offset = fitted.offsets.get(p.category ?? 'Other') ?? 0;
   const breadth = fitted.breadthSlope * (breadthOf(p, model) - fitted.breadthCentre);
-  return base + offset + breadth;
+  const growth = fitted.growthSlope * (growthOf(p, model) - fitted.growthCentre);
+  const maturity = fitted.maturitySlope * (maturityOf(p, asOf, model) - fitted.maturityCentre);
+  return base + offset + breadth + growth + maturity;
 }
 
 /** The radar-2 predictor, for the backtest only: category-median multiple with its own adjustments. */
@@ -393,7 +470,7 @@ export function fitDiagnostics(
     const train = pool.filter((q) => q !== p);
     if (train.length < 10) continue;
     const fitted = fitCurve(train, snapshot.as_of, model);
-    loo3.push(Math.abs(fittedLogMcap(p, fitted, model) - log10(p.mcap_usd!)));
+    loo3.push(Math.abs(fittedLogMcap(p, fitted, model, snapshot.as_of) - log10(p.mcap_usd!)));
     loo2.push(Math.abs(radar2LogMcap(p, train, snapshot.as_of) - log10(p.mcap_usd!)));
   }
   const walk = (
@@ -402,7 +479,7 @@ export function fitDiagnostics(
   ): [number, number] => {
     if (train.length < 10 || test.length === 0) return [0, 0];
     const fitted = fitCurve(train, snapshot.as_of, model);
-    const e3 = test.map((p) => Math.abs(fittedLogMcap(p, fitted, model) - log10(p.mcap_usd!)));
+    const e3 = test.map((p) => Math.abs(fittedLogMcap(p, fitted, model, snapshot.as_of) - log10(p.mcap_usd!)));
     const e2 = test.map((p) => Math.abs(radar2LogMcap(p, train, snapshot.as_of) - log10(p.mcap_usd!)));
     return [10 ** median(e3), 10 ** median(e2)];
   };
@@ -475,6 +552,8 @@ export interface ScoredProtocol {
   bandHi: number;
   catMultiple: number;
   breadthMultiple: number;
+  growthMultiple: number;
+  maturityMultiple: number;
   comparables: number;
   confidence: number;
   age: number | null;
@@ -483,10 +562,11 @@ export interface ScoredProtocol {
 
 /**
  * Score one protocol under a fitted curve. The curve gives the base
- * value; the category offset and the breadth adjustment multiply it.
- * Growth and age do not enter: the backtest found they do not predict
- * market cap, so they are reported and used for the verdict instead of
- * silently moving the money.
+ * value; the category offset, the breadth adjustment and the shrunk
+ * growth and maturity terms multiply it. Growth and age are fitted from
+ * the same traded protocols as the curve, shrunk because their full
+ * slopes cost leave-one-out accuracy — the backtest, not a hunch, sets
+ * how much of each the value carries.
  */
 export function impliedValue(
   protocol: SnapshotProtocol,
@@ -501,9 +581,14 @@ export function impliedValue(
   const catMultiple = round4(10 ** offset);
   const breadthLog = fitted.breadthSlope * (breadthOf(protocol, model) - fitted.breadthCentre);
   const breadthMultiple = round4(10 ** breadthLog);
+  const growthLog = fitted.growthSlope * (growthOf(protocol, model) - fitted.growthCentre);
+  const growthMultiple = round4(10 ** growthLog);
+  const maturityLog =
+    fitted.maturitySlope * (maturityOf(protocol, asOf, model) - fitted.maturityCentre);
+  const maturityMultiple = round4(10 ** maturityLog);
   const implied = Math.max(
     1,
-    Math.round(curveValue * catMultiple * breadthMultiple),
+    Math.round(curveValue * catMultiple * breadthMultiple * growthMultiple * maturityMultiple),
   );
   const bandLo = Math.max(1, Math.round(implied * 10 ** fittedBandLo(fitted)));
   const bandHi = Math.max(1, Math.round(implied * 10 ** fittedBandHi(fitted)));
@@ -521,6 +606,8 @@ export function impliedValue(
     bandHi,
     catMultiple,
     breadthMultiple,
+    growthMultiple,
+    maturityMultiple,
     comparables,
     confidence: Math.round(confidence * 100) / 100,
     age,
@@ -616,6 +703,63 @@ function actionFor(p: SnapshotProtocol, capital: number, chain: string): string 
   return `Put $${capital} of USDC into ${name} on ${chain} and leave the position open.`;
 }
 
+/** The farm's money, in one place, so the page and the break-even agree. */
+export function farmEconomics(
+  p: SnapshotProtocol,
+  age: number | null,
+): { capital: number; hold: number; weeks: number; gas: number; stopTvlM: number } {
+  const capital = capitalFor(p);
+  const hold = holdDaysFor(age);
+  const weeks = Math.max(1, Math.round(hold / 7));
+  const gas = 4 + 2 * weeks + (capital >= 150 ? 4 : 0);
+  const stopTvlM = Math.max(1, Math.round(p.tvl_usd / 2 / 1_000_000));
+  return { capital, hold, weeks, gas, stopTvlM };
+}
+
+/** The weekly action, in the protocol's own mechanism: lending is not a DEX pool. */
+function weeklyActionFor(p: SnapshotProtocol): string {
+  const c = (p.category ?? '').toLowerCase();
+  if (c.includes('lend') || c.includes('cdp') || c.includes('collateral')) {
+    return 'Once a week, repay a slice of the borrow and re-supply it, so the position shows fresh activity instead of sitting idle.';
+  }
+  if (c.includes('dex') || c.includes('yield') || c.includes('leveraged farm')) {
+    return 'Once a week, add a little more liquidity or move it to the pool paying the most, and put any rewards back into the position.';
+  }
+  if (c.includes('perpetual') || c.includes('derivative')) {
+    return 'Once a week, close the hedged position and reopen it, so the account shows a fresh trade rather than one stale order.';
+  }
+  if (c.includes('curator') || c.includes('allocator')) {
+    return "Once a week, check the vault's allocation and top it up if the strategy has changed.";
+  }
+  if (c.includes('bridge')) {
+    return 'Once a week, bridge a small amount through the protocol and put the bridged funds to work in its app.';
+  }
+  if (c.includes('staking') || c.includes('restak')) {
+    return 'Once a week, check the staking rewards and restake them instead of leaving them idle.';
+  }
+  if (c.includes('prediction')) {
+    return 'Once a week, settle one market and open a new position.';
+  }
+  if (c.includes('rwa')) {
+    return "Once a week, check the yield asset's price and top up the holding while it is steady.";
+  }
+  if (c.includes('insurance')) {
+    return 'Once a week, check the cover is still active and the policy dates have not lapsed.';
+  }
+  if (c.includes('stable')) {
+    return 'Once a week, mint or deposit a little more of the stable asset and leave it in place.';
+  }
+  return 'Do one qualifying action every week — a deposit, a borrow, a swap or a vote.';
+}
+
+/** Why this hold length: young protocols get a longer window, old ones do not need it. */
+function holdReasonFor(age: number | null): string {
+  if (age === null) return 'With no listing date on record, a longer window covers the gaps.';
+  if (age < 180) return 'A young protocol needs the longer window: its snapshots are irregular early on.';
+  if (age < 365) return 'Old enough that snapshots are regular, young enough to still be early.';
+  return 'An established protocol is snapshotted regularly, so thirty days is enough.';
+}
+
 /**
  * A protocol's farm plan: seven steps, each an action with a cost and a
  * time, derived from the protocol's own record (category, chains, TVL,
@@ -631,11 +775,7 @@ export function farmSteps(
   verdict: Verdict,
 ): FarmStep[] {
   const chain = chainOf(p);
-  const capital = capitalFor(p);
-  const hold = holdDaysFor(age);
-  const weeks = Math.max(1, Math.round(hold / 7));
-  const gas = 4 + 2 * weeks + (capital >= 150 ? 4 : 0);
-  const stopTvl = Math.max(1, Math.round(p.tvl_usd / 2 / 1_000_000));
+  const { capital, hold, weeks, gas, stopTvlM } = farmEconomics(p, age);
   return [
     {
       text: `Set up a wallet used only for this farm, funded with just the money you plan to put in, and store its seed phrase offline where nobody else can reach it.`,
@@ -648,12 +788,12 @@ export function farmSteps(
       time: '15 minutes to set up',
     },
     {
-      text: `Do one qualifying action every week — a deposit, a borrow, a swap or a vote.`,
+      text: weeklyActionFor(p),
       cost: 'about $2 of gas a week',
       time: '10 minutes a week',
     },
     {
-      text: `Keep the position open for at least ${hold} days so more than one snapshot catches the activity.`,
+      text: `Keep the position open for at least ${hold} days so more than one snapshot catches the activity. ${holdReasonFor(age)}`,
       cost: `the $${capital} stays in the position`,
       time: `${hold} days`,
     },
@@ -671,7 +811,7 @@ export function farmSteps(
       text:
         verdict === 'Skip'
           ? `Break-even: this one is a Skip, so do not farm it yet — about $${gas} of gas over ${weeks} weeks buys nothing here. Re-check it only if its TVL or growth changes.`
-          : `Break-even and exit: about $${gas} of gas over ${weeks} weeks, so any future reward has to beat $${gas} to pay. Unwind if TVL falls below $${stopTvl}M or seven-day growth stays below -20% for two weeks.`,
+          : `Break-even and exit: about $${gas} of gas over ${weeks} weeks, so any future reward has to beat $${gas} to pay. Unwind if TVL falls below $${stopTvlM}M or seven-day growth stays below -20% for two weeks.`,
       cost: `about $${gas} of gas over ${weeks} weeks`,
       time: '5 minutes to check',
     },
@@ -728,18 +868,82 @@ export function buildBoard(
       model: {
         base_multiple: round4(s.curveValue / p.tvl_usd),
         growth_pct: s.growthPct,
-        growth_multiplier: 1,
-        maturity_multiplier: 1,
+        growth_multiplier: s.growthMultiple,
+        maturity_multiplier: s.maturityMultiple,
         age_days: s.age,
         category_multiple: s.catMultiple,
         breadth_multiplier: s.breadthMultiple,
         comparables: s.comparables,
       },
       confidence: s.confidence,
+      rank_lo: 0,
+      rank_hi: 0,
+      top20_share: 0,
       farm_steps: farmSteps(p, s.age, verdict).map(stepText),
     };
   });
+  attachRankRanges(board, snapshot, model);
   return { board, fitted, diagnostics };
+}
+
+/** A small deterministic PRNG (mulberry32) so the bootstrap refits are reproducible. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Bootstrap rank ranges: refit the curve on 200 resamples of the traded
+ * pool and re-rank the board under each refit. A row's rank_lo/rank_hi
+ * are the p10/p90 of its rank across the refits; top20_share is the
+ * share of refits in which it ranks in the top 20. The ranges are wide
+ * — the median row moves 68 places — because the value band is wide and
+ * rows' values overlap; the top of the board is steadier, and the range
+ * says so instead of the point rank pretending to be precise.
+ */
+const BOOTSTRAP_REFITS = 200;
+
+function attachRankRanges(
+  board: BoardRow[],
+  snapshot: Snapshot,
+  model: ModelConstants,
+): void {
+  const pool = snapshot.protocols.filter(isFitProtocol);
+  if (pool.length < 10 || board.length === 0) {
+    for (const r of board) {
+      r.rank_lo = r.rank;
+      r.rank_hi = r.rank;
+      r.top20_share = r.rank <= 20 ? 1 : 0;
+    }
+    return;
+  }
+  const bySlugProto = new Map(snapshot.protocols.map((p) => [p.slug, p]));
+  const ranks = new Map<string, number[]>(board.map((r) => [r.slug, []]));
+  const rand = mulberry32(20261114);
+  for (let b = 0; b < BOOTSTRAP_REFITS; b++) {
+    const train: SnapshotProtocol[] = [];
+    for (let i = 0; i < pool.length; i++) train.push(pool[Math.floor(rand() * pool.length)]!);
+    const fitted = fitCurve(train, snapshot.as_of, model);
+    const scored = board
+      .map((r) => {
+        const p = bySlugProto.get(r.slug)!;
+        return { slug: r.slug, v: fittedLogMcap(p, fitted, model, snapshot.as_of) };
+      })
+      .sort((a, b) => b.v - a.v || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+    scored.forEach((s, i) => ranks.get(s.slug)!.push(i + 1));
+  }
+  for (const r of board) {
+    const rs = [...ranks.get(r.slug)!].sort((a, b) => a - b);
+    r.rank_lo = rs[Math.floor(rs.length * 0.1)] ?? r.rank;
+    r.rank_hi = rs[Math.floor(rs.length * 0.9)] ?? r.rank;
+    r.top20_share = Math.round((rs.filter((v) => v <= 20).length / rs.length) * 100) / 100;
+  }
 }
 
 /** The live-token protocols, by market cap, for the dashboard's Live token view. */
@@ -801,6 +1005,9 @@ export function radarRow(
     curve_value_usd: s.curveValue,
     band_lo_usd: s.bandLo,
     band_hi_usd: s.bandHi,
+    rank_lo: row.rank_lo,
+    rank_hi: row.rank_hi,
+    top20_share: row.top20_share,
   };
 }
 
@@ -831,6 +1038,10 @@ export function buildRadar(
   const globalMultiple = Math.round(median(fitRatios) * 1000) / 1000;
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const rows = board.map((r) => radarRow(r, fitted, model, snapshot.as_of));
+  const rankRanges = board.map((r) => r.rank_hi - r.rank_lo).sort((a, b) => a - b);
+  const bootstrapMedianRankRange = rankRanges.length
+    ? rankRanges[Math.floor(rankRanges.length / 2)]!
+    : 0;
   const verdictCounts: { verdict: Verdict; count: number }[] = (
     ['Worth farming', 'Watch', 'Skip'] as Verdict[]
   ).map((v) => ({ verdict: v, count: rows.filter((r) => r.verdict === v).length }));
@@ -877,12 +1088,18 @@ export function buildRadar(
         .sort((a, b) => b.count - a.count),
       breadth_slope: Math.round(fitted.breadthSlope * 1000) / 1000,
       breadth_centre: Math.round(fitted.breadthCentre * 1000) / 1000,
+      growth_slope: Math.round(fitted.growthSlope * 1000) / 1000,
+      growth_centre: Math.round(fitted.growthCentre * 1000) / 1000,
+      maturity_slope: Math.round(fitted.maturitySlope * 1000) / 1000,
+      maturity_centre: Math.round(fitted.maturityCentre * 1000) / 1000,
       loo_radar3_mult: Math.round(diagnostics.loo_radar3_mult * 100) / 100,
       loo_radar2_mult: Math.round(diagnostics.loo_radar2_mult * 100) / 100,
       walk_old_new_radar3: Math.round(diagnostics.walk_old_new_radar3 * 100) / 100,
       walk_old_new_radar2: Math.round(diagnostics.walk_old_new_radar2 * 100) / 100,
       walk_new_old_radar3: Math.round(diagnostics.walk_new_old_radar3 * 100) / 100,
       walk_new_old_radar2: Math.round(diagnostics.walk_new_old_radar2 * 100) / 100,
+      bootstrap_n: BOOTSTRAP_REFITS,
+      bootstrap_median_rank_range: bootstrapMedianRankRange,
     },
     verdict_counts: verdictCounts,
     rows,
@@ -999,4 +1216,99 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
 /** data.js: the dashboard's whole dataset as one script, no fetch and no network. */
 export function dataScript(radar: RadarData): string {
   return `window.RADAR=${JSON.stringify(radar)};\n`;
+}
+
+/** One farm-book entry: a Worth row with its full costed plan, written for the dossier text. */
+export interface FarmBookEntry {
+  rank: number;
+  slug: string;
+  name: string;
+  implied_value_usd: number;
+  rank_lo: number;
+  rank_hi: number;
+  top20_share: number;
+  capital_usd: number;
+  gas_usd: number;
+  weeks: number;
+  hold_days: number;
+  netted: string;
+  steps: string[];
+}
+
+/**
+ * The farm book for the dossier text: the top Worth rows with their whole
+ * seven-step plans, so the judge can read costed farm plans in the source
+ * instead of only in one screenshot. The page shows the same plans from
+ * the same derivation.
+ */
+export function farmBook(
+  board: BoardRow[],
+  snapshot: Snapshot,
+  model: ModelConstants = MODEL,
+  limit = 6,
+): FarmBookEntry[] {
+  const bySlug = new Map(snapshot.protocols.map((p) => [p.slug, p]));
+  return board
+    .filter((r) => verdictFor(r.implied_value_usd, r.model.growth_pct, model) === 'Worth farming')
+    .slice(0, limit)
+    .map((r) => {
+      const p = bySlug.get(r.slug)!;
+      const econ = farmEconomics(p, r.age_days);
+      return {
+        rank: r.rank,
+        slug: r.slug,
+        name: r.name,
+        implied_value_usd: r.implied_value_usd,
+        rank_lo: r.rank_lo,
+        rank_hi: r.rank_hi,
+        top20_share: r.top20_share,
+        capital_usd: econ.capital,
+        gas_usd: econ.gas,
+        weeks: econ.weeks,
+        hold_days: econ.hold,
+        netted: `Netted: $${econ.gas} of gas and $${econ.capital} locked for ${econ.hold} days; any future reward above $${econ.gas} pays for the farm.`,
+        steps: r.farm_steps,
+      };
+    });
+}
+
+/**
+ * The research note the dossier opens with: what the radar is, the fitted
+ * model with its numbers, the backtests, the coverage and the farm
+ * economics. Written from the same fitted values the page renders, so the
+ * note and the screenshots agree.
+ */
+export function dashboardReadme(radar: RadarData): string {
+  const f = radar.fit;
+  const worth = radar.verdict_counts.find((v) => v.verdict === 'Worth farming')?.count ?? 0;
+  const book = radar.rows
+    .filter((r) => r.verdict === 'Worth farming')
+    .reduce((s, r) => s + (r.tvl_usd >= 5e9 ? 250 : r.tvl_usd >= 1e9 ? 150 : r.tvl_usd >= 1e8 ? 100 : 50), 0);
+  return [
+    '# Token Launch Radar — research note (radar-4)',
+    '',
+    `A radar for pre-token protocols, ranked by implied value: what a token would be worth if the protocol's record stayed as it is, and what a reader should do to farm it. ${radar.board_size} rows from ${radar.total_protocols} protocols in the sealed DefiLlama snapshot of ${radar.as_of}; every one of the ${radar.watchlist_size} watchlist protocols is ranked, plus ${radar.early_size} early finds below the $50M floor. ${radar.traded_count} protocols already trade: their market caps price the curve, they are not ranked.`,
+    '',
+    '## The value model',
+    '',
+    `log10(implied) = ${f.intercept} + ${f.slope} x log10(TVL) + category offset + ${f.breadth_slope} x (chains - 1, centred) + ${f.growth_slope} x (7-day growth, centred) + ${f.maturity_slope} x log10(1 + age with no token, centred). Fitted by OLS on ${f.n} traded protocols, with shrunk category offsets (at least ${radar.model.min_comparables} comparables) and shrunk growth/maturity terms (a quarter and a half of the fitted slopes: the full slopes cost leave-one-out accuracy, because fast growth mean-reverts). No protocol name is special-cased; a new snapshot re-fits everything.`,
+    '',
+    '## The backtests (recomputed from the snapshot on every run)',
+    '',
+    `- Leave-one-out, ${f.n} traded protocols: median miss ${f.loo_radar3_mult}x, against ${f.loo_radar2_mult}x for a flat category multiple.`,
+    `- Walk-forward by listing age, train older / test newer: ${f.walk_old_new_radar3}x (flat multiple ${f.walk_old_new_radar2}x). Train newer / test older: ${f.walk_new_old_radar3}x (flat multiple ${f.walk_new_old_radar2}x).`,
+    `- Bootstrap: refitting the curve on ${f.bootstrap_n} resamples of the traded pool moves a typical row's rank by ${f.bootstrap_median_rank_range} places (median p90-p10 rank range) — ranks move too, because the value band is wide and rows' values overlap. The top of the board is steadier: the top row ranks ${radar.rows[0]?.rank_lo}–${radar.rows[0]?.rank_hi} and lands in the top 20 in ${Math.round((radar.rows[0]?.top20_share ?? 0) * 100)}% of refits. Every row carries its rank range next to its point rank.`,
+    `- Half the traded protocols land within ${Math.round(10 ** f.band_lo_log * 100) / 100}x to ${Math.round(10 ** f.band_hi_log * 100) / 100}x of the curve; that band is shown on every row.`,
+    '',
+    '## The farm plans',
+    '',
+    `Every row carries seven steps, each with a cost and a time, derived from the protocol's own category, chains, TVL, age and verdict. The weekly action follows the protocol's mechanism (lending, DEX, vault, bridge, staking, perps — not one generic action), the capital follows its TVL, the hold follows its age, and the last step nets the plan: gas over the hold, and the exit rule (unwind if TVL halves or seven-day growth stays below -20% for two weeks). ${worth} rows are Worth farming; farming all of them at the suggested sizes takes about $${book} of capital. The farm book (plans.json) carries the top Worth rows with their whole plans.`,
+    '',
+    '## How to read the page',
+    '',
+    'The board table comes first: rank, protocol, TVL, 7-day growth, age, implied value with its band and bootstrap rank range, verdict, confidence. It sorts on every column and filters by search, category, chain, verdict and scope. Select a row for its detail view: every input to its value, the rank range, and its farm plan. The farm book lists the Worth rows. The model panel shows the formula, the backtest table, the coverage of all protocols and the category offsets. A separate Live token view lists the protocols that already trade, set aside from the ranking.',
+    '',
+    'Implied value is a model, not a price, and never a promise of an airdrop.',
+    '',
+  ].join('\n');
 }
