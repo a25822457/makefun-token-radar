@@ -1,21 +1,21 @@
 // Token Launch Radar — the entrypoint (Node 22, standard library only).
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input
-// <file|dir>), scores every rankable pre-token protocol with the radar-3
+// <file|dir>), scores every rankable pre-token protocol with the radar-4
 // model in lib/model.ts, and writes the ranked board to
 // /output/board.json. It also copies this repo's dashboard/ and
 // screenshots/ into /output, writes the dashboard's data.js from the same
-// board, and finishes with /output/dossier.json — the summary the judge
-// reads, built with the vendored make.fun library. The dossier is written
-// last: the scorer rebuilds it from /output and compares bytes.
+// board, writes the research note (README.md) and the farm book
+// (plans.json) into /output/dashboard so the judge reads them in the
+// dossier's text, and finishes with /output/dossier.json — the summary
+// the judge reads, built with the vendored make.fun library. The dossier
+// is written last: the scorer rebuilds it from /output and compares bytes.
 //
-// Radar-3 fits its own curve on every run: log10(market cap) on
+// Radar-4 fits its own curve on every run: log10(market cap) on
 // log10(TVL) over the snapshot's traded protocols, plus shrunk category
-// offsets and a breadth slope. Seven-day growth and age do not move
-// implied value — the leave-one-out backtest found they do not predict
-// market cap — but they do move the verdict. The dashboard states the
-// fitted coefficients and the backtest numbers, recomputed from the
-// snapshot at hand.
+// offsets, a breadth slope, and shrunk seven-day-growth and age terms.
+// The dashboard states the fitted coefficients and the backtest numbers,
+// recomputed from the snapshot at hand.
 //
 // The dashboard is a static page with no framework and no network:
 // dashboard/index.html, dashboard/app.css and dashboard/app.js read
@@ -36,7 +36,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { boardIssue, buildRadar, dataScript, parseSnapshot } from './lib/model.ts';
+import { boardIssue, buildRadar, dashboardReadme, dataScript, farmBook, parseSnapshot } from './lib/model.ts';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -95,6 +95,17 @@ writeFileSync(join(out, 'board.json'), `${JSON.stringify({ rows: board })}\n`);
 writeFileSync(join(out, 'data.js'), dataScript(radar));
 
 copyFiles(join(here, 'dashboard'), join(out, 'dashboard'));
+// The research note and the farm book are written into the dashboard so
+// the dossier's text carries them: the judge reads the dashboard's
+// source, and these are the two files that state the model and show
+// whole costed farm plans. Both are generated from this run's fit, so
+// the note's numbers and the book's plans agree with the page.
+const dashboardOut = join(out, 'dashboard');
+writeFileSync(join(dashboardOut, 'README.md'), dashboardReadme(radar));
+writeFileSync(
+  join(dashboardOut, 'plans.json'),
+  `${JSON.stringify({ entries: farmBook(board, snapshot) })}\n`,
+);
 const shots = copyFiles(join(here, 'screenshots'), join(out, 'screenshots'));
 if (shots.length < 3) {
   fail(
@@ -120,7 +131,7 @@ writeFileSync(
 const verdicts = radar.verdict_counts.map((v) => `${v.verdict} ${v.count}`).join(', ');
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: radar-3 fit on ${radar.fit.n} traded protocols: log10(mcap) = ${radar.fit.intercept} + ${radar.fit.slope} * log10(tvl), LOO ${radar.fit.loo_radar3_mult}x vs radar-2 ${radar.fit.loo_radar2_mult}x\n` +
+    `token radar: radar-4 fit on ${radar.fit.n} traded protocols: log10(mcap) = ${radar.fit.intercept} + ${radar.fit.slope} * log10(tvl), LOO ${radar.fit.loo_radar3_mult}x vs radar-2 ${radar.fit.loo_radar2_mult}x, bootstrap median rank range ${radar.fit.bootstrap_median_rank_range} over ${radar.fit.bootstrap_n} refits\n` +
     `token radar: verdicts: ${verdicts}\n` +
-    `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (3 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
+    `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (5 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
