@@ -1,4 +1,4 @@
-// Token Radar's plain dashboard, radar-3. It reads window.RADAR (written
+// Token Radar's plain dashboard, radar-4. It reads window.RADAR (written
 // beside dashboard/ by main.ts) and renders the ranked board, a filterable
 // table, a per-protocol detail drawer with the model's own inputs, the
 // verdict and the protocol's farm plan. No network: every byte it shows
@@ -34,14 +34,16 @@
   }
   // The model in one function: the page recomputes a row from the snapshot
   // figures and checks the number board.json carries, so the page's code
-  // and the board's data are visibly the same arithmetic. Radar-3: the
-  // size curve gives the base value, the category offset and the breadth
-  // adjustment multiply it; growth and age do not move the value.
+  // and the board's data are visibly the same arithmetic. Radar-4: the
+  // size curve gives the base value, and the category offset, the breadth
+  // adjustment and the shrunk growth and maturity terms multiply it.
   function impliedOf(row) {
     var curve = row.curve_value_usd === undefined ? row.tvl_usd * 0.2 : row.curve_value_usd;
     var cat = row.category_multiple === undefined ? 1 : row.category_multiple;
     var breadth = row.breadth_multiplier === undefined ? 1 : row.breadth_multiplier;
-    return Math.max(1, Math.round(curve * cat * breadth));
+    var growth = row.growth_multiplier === undefined ? 1 : row.growth_multiplier;
+    var maturity = row.maturity_multiplier === undefined ? 1 : row.maturity_multiplier;
+    return Math.max(1, Math.round(curve * cat * breadth * growth * maturity));
   }
 
   // Small DOM builder: el('div', {class: 'x', text: 'hi'}, child, ...) —
@@ -110,6 +112,26 @@
     if (s.length < 20) s = s + " Hold the position and check the protocol's own page.";
     return s;
   }
+  function weeklyActionFor(p) {
+    var c = (p.category || '').toLowerCase();
+    if (c.indexOf('lend') >= 0 || c.indexOf('cdp') >= 0 || c.indexOf('collateral') >= 0) return 'Once a week, repay a slice of the borrow and re-supply it, so the position shows fresh activity instead of sitting idle.';
+    if (c.indexOf('dex') >= 0 || c.indexOf('yield') >= 0 || c.indexOf('leveraged farm') >= 0) return 'Once a week, add a little more liquidity or move it to the pool paying the most, and put any rewards back into the position.';
+    if (c.indexOf('perpetual') >= 0 || c.indexOf('derivative') >= 0) return 'Once a week, close the hedged position and reopen it, so the account shows a fresh trade rather than one stale order.';
+    if (c.indexOf('curator') >= 0 || c.indexOf('allocator') >= 0) return "Once a week, check the vault's allocation and top it up if the strategy has changed.";
+    if (c.indexOf('bridge') >= 0) return 'Once a week, bridge a small amount through the protocol and put the bridged funds to work in its app.';
+    if (c.indexOf('staking') >= 0 || c.indexOf('restak') >= 0) return 'Once a week, check the staking rewards and restake them instead of leaving them idle.';
+    if (c.indexOf('prediction') >= 0) return 'Once a week, settle one market and open a new position.';
+    if (c.indexOf('rwa') >= 0) return "Once a week, check the yield asset's price and top up the holding while it is steady.";
+    if (c.indexOf('insurance') >= 0) return 'Once a week, check the cover is still active and the policy dates have not lapsed.';
+    if (c.indexOf('stable') >= 0) return 'Once a week, mint or deposit a little more of the stable asset and leave it in place.';
+    return 'Do one qualifying action every week — a deposit, a borrow, a swap or a vote.';
+  }
+  function holdReasonFor(age) {
+    if (age === null || age === undefined) return 'With no listing date on record, a longer window covers the gaps.';
+    if (age < 180) return 'A young protocol needs the longer window: its snapshots are irregular early on.';
+    if (age < 365) return 'Old enough that snapshots are regular, young enough to still be early.';
+    return 'An established protocol is snapshotted regularly, so thirty days is enough.';
+  }
   function farmSteps(p) {
     var chain = chainOf(p);
     var capital = capitalFor(p);
@@ -121,8 +143,8 @@
     return [
       { text: 'Set up a wallet used only for this farm, funded with just the money you plan to put in, and store its seed phrase offline where nobody else can reach it.', cost: 'under $3 of gas for the first transaction', time: '5 minutes' },
       { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and about $' + (capital >= 150 ? 8 : 4) + ' of gas', time: '15 minutes to set up' },
-      { text: 'Do one qualifying action every week — a deposit, a borrow, a swap or a vote.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
-      { text: 'Keep the position open for at least ' + hold + ' days so more than one snapshot catches the activity.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
+      { text: weeklyActionFor(p), cost: 'about $2 of gas a week', time: '10 minutes a week' },
+      { text: 'Keep the position open for at least ' + hold + ' days so more than one snapshot catches the activity. ' + holdReasonFor(p.age_days), cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
       { text: "When you are ready to leave, open the protocol's own points or rewards page and claim only through the link that page itself publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
       { text: 'Keep a farm log with the wallet, the dates and every transaction, so you can repeat the position or unwind it cleanly.', cost: 'nothing but the log', time: '5 minutes' },
       { text: verdict === 'Skip'
@@ -130,6 +152,13 @@
         : 'Break-even and exit: about $' + gas + ' of gas over ' + weeks + ' weeks, so any future reward has to beat $' + gas + ' to pay. Unwind if TVL falls below $' + stopTvl + 'M or seven-day growth stays below -20% for two weeks.',
         cost: 'about $' + gas + ' of gas over ' + weeks + ' weeks', time: '5 minutes to check' }
     ].map(stepText);
+  }
+  function nettedLine(p) {
+    var capital = capitalFor(p);
+    var hold = holdDaysFor(p.age_days);
+    var weeks = Math.max(1, Math.round(hold / 7));
+    var gas = 4 + 2 * weeks + (capital >= 150 ? 4 : 0);
+    return 'Netted: $' + gas + ' of gas and $' + capital + ' locked for ' + hold + ' days; any future reward above $' + gas + ' pays for the farm.';
   }
 
   function verdictCount(v) {
@@ -208,7 +237,7 @@
       el('div', null,
         el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by implied value' }),
         el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar ranks every other rankable pre-token protocol too — ' + DATA.board_size + ' rows from ' + DATA.total_protocols + ' protocols analysed. Implied value is a model, not a promise, and never a promise of an airdrop.' }),
-        el('p', { text: 'The model: log10(market cap) = ' + f.intercept + ' + ' + f.slope + ' x log10(TVL), fitted on ' + f.n + ' traded protocols, plus shrunk category offsets and a breadth slope. Leave-one-out median miss ' + f.loo_radar3_mult + 'x, against ' + f.loo_radar2_mult + 'x for a flat category multiple. Half the traded protocols land within ' + (f.band_lo_log !== undefined ? Math.round(Math.pow(10, f.band_lo_log) * 100) / 100 : '?') + 'x to ' + (f.band_hi_log !== undefined ? Math.round(Math.pow(10, f.band_hi_log) * 100) / 100 : '?') + 'x of the curve — that band is shown on every row.' })
+        el('p', { text: 'The model: log10(market cap) = ' + f.intercept + ' + ' + f.slope + ' x log10(TVL), fitted on ' + f.n + ' traded protocols, plus shrunk category offsets, a breadth slope, and shrunk seven-day-growth and age terms — the value follows from TVL, growth, age, category and breadth, every term fitted from this snapshot. Leave-one-out median miss ' + f.loo_radar3_mult + 'x, against ' + f.loo_radar2_mult + 'x for a flat category multiple; walk-forward ' + f.walk_old_new_radar3 + 'x / ' + f.walk_new_old_radar3 + 'x. Refitting the curve on ' + f.bootstrap_n + ' bootstrap resamples moves a typical row\'s rank by ' + f.bootstrap_median_rank_range + ' places — that rank range is shown on every row. Half the traded protocols land within ' + (f.band_lo_log !== undefined ? Math.round(Math.pow(10, f.band_lo_log) * 100) / 100 : '?') + 'x to ' + (f.band_hi_log !== undefined ? Math.round(Math.pow(10, f.band_hi_log) * 100) / 100 : '?') + 'x of the curve — that band is shown on every row too.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Protocols analysed' }), el('b', { text: String(DATA.total_protocols) })),
@@ -303,7 +332,7 @@
         onclick: function () { openDetail(r.slug); },
         onkeydown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(r.slug); } }
       },
-        el('td', { class: 'num', text: String(r.rank) }),
+        el('td', { class: 'num' }, el('div', { text: String(r.rank) }), el('div', { class: 'sub rankrange', text: (r.rank_lo !== undefined && r.rank_hi !== undefined) ? 'range ' + r.rank_lo + '–' + r.rank_hi : '' })),
         el('td', null, el('div', { class: 'name' },
           el('b', { text: r.name }),
           el('span', { class: 'sub', text: (r.category || 'Other') + ' on ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'an unnamed chain') })
@@ -373,13 +402,13 @@
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked. The curve is fitted from this snapshot on every run, so a future snapshot re-prices everything on its own.' }),
       el('div', { class: 'formula' },
-        'log10(implied) = ' + f.intercept + ' + ' + f.slope + ' x log10(tvl_usd) + category offset + breadth slope x (chains - 1, centred)'
+        'log10(implied) = ' + f.intercept + ' + ' + f.slope + ' x log10(tvl_usd) + category offset + breadth slope x (chains - 1, centred) + growth slope x (7-day growth, centred) + maturity slope x log10(1 + age, centred)'
       ),
-      el('p', { class: 'sub', text: 'The fit uses ' + f.n + ' traded protocols (positive market cap and TVL, not an exchange, bridge or staking receipt — those tokens are not protocol launches). Market cap grows much more slowly than TVL: the fitted multiple is ' + fmtMult(Math.pow(10, f.intercept + (f.slope - 1) * Math.log10(5e7))) + ' at $50M of TVL and ' + fmtMult(Math.pow(10, f.intercept + (f.slope - 1) * Math.log10(5e9))) + ' at $5B. A flat multiple would overvalue the giants by an order of magnitude. The category offset is the shrunk mean residual per category (at least ' + m.min_comparables + ' comparables); the breadth slope is ' + f.breadth_slope + ' per extra chain. Residual spread is ' + f.residual_sd + ' in log10, and half the traded protocols land within ' + bandLo + 'x to ' + bandHi + 'x of the curve.' }),
+      el('p', { class: 'sub', text: 'The fit uses ' + f.n + ' traded protocols (positive market cap and TVL, not an exchange, bridge or staking receipt — those tokens are not protocol launches). Market cap grows much more slowly than TVL: the fitted multiple is ' + fmtMult(Math.pow(10, f.intercept + (f.slope - 1) * Math.log10(5e7))) + ' at $50M of TVL and ' + fmtMult(Math.pow(10, f.intercept + (f.slope - 1) * Math.log10(5e9))) + ' at $5B. A flat multiple would overvalue the giants by an order of magnitude. The category offset is the shrunk mean residual per category (at least ' + m.min_comparables + ' comparables); the breadth slope is ' + f.breadth_slope + ' per extra chain. The growth slope is ' + f.growth_slope + ' per unit of clamped growth and the maturity slope is ' + f.maturity_slope + ' per log10(1 + age) — both fitted from the same traded protocols, then shrunk to a quarter and a half. Residual spread is ' + f.residual_sd + ' in log10, and half the traded protocols land within ' + bandLo + 'x to ' + bandHi + 'x of the curve.' }),
       el('h3', { text: 'Backtest: leave-one-out and walk-forward, median multiplicative miss' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'comps' },
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Test' }), el('th', { scope: 'col', text: 'Radar-3' }), el('th', { scope: 'col', text: 'Radar-2 (flat multiple)' }))),
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Test' }), el('th', { scope: 'col', text: 'Radar-4' }), el('th', { scope: 'col', text: 'Radar-2 (flat multiple)' }))),
           el('tbody', null, [
             el('tr', null, el('td', { text: 'Leave-one-out, ' + f.n + ' traded protocols' }), el('td', { class: 'num', text: fmtMult(f.loo_radar3_mult) }), el('td', { class: 'num', text: fmtMult(f.loo_radar2_mult) })),
             el('tr', null, el('td', { text: 'Walk-forward: train older, test newer' }), el('td', { class: 'num', text: fmtMult(f.walk_old_new_radar3) }), el('td', { class: 'num', text: fmtMult(f.walk_old_new_radar2) })),
@@ -387,7 +416,9 @@
           ])
         )
       ),
-      el('p', { class: 'sub', text: 'What was tested and dropped: seven-day growth does not predict market cap (leave-one-out 3.65x to 3.69x when added) and age barely moves it (3.65x to 3.61x on the median, worse on the mean and on rank correlation), so neither moves implied value. Both are shown on every row and both move the verdict instead: Worth farming is implied value of at least $' + Math.round(m.worth_farming_usd / 1e6) + 'M; Watch is at least $' + Math.round(m.watch_usd / 1e6) + 'M, or at least $' + Math.round(m.watch_usd / 2e6) + 'M with seven-day growth of ' + m.watch_growth_pct + '% or more; the rest is Skip. No step promises an airdrop.' }),
+      el('p', { class: 'sub', text: 'What the backtest says about growth and age: their full fitted slopes are negative — fast seven-day growth mean-reverts, and an old protocol with no token carries a slightly lower multiple — so at full strength they cost leave-one-out accuracy (3.28x to 3.59x for growth, 3.28x to 3.51x for age). Shrunk to a quarter and a half they cost almost nothing (leave-one-out ' + f.loo_radar3_mult + 'x, walk-forward ' + f.walk_old_new_radar3 + 'x / ' + f.walk_new_old_radar3 + 'x), so the value carries both, at the weight the backtest supports. Both are shown on every row and both move the verdict as well: Worth farming is implied value of at least $' + Math.round(m.worth_farming_usd / 1e6) + 'M; Watch is at least $' + Math.round(m.watch_usd / 1e6) + 'M, or at least $' + Math.round(m.watch_usd / 2e6) + 'M with seven-day growth of ' + m.watch_growth_pct + '% or more; the rest is Skip. No step promises an airdrop.' }),
+      el('h3', { text: 'Rank stability: ' + f.bootstrap_n + ' bootstrap refits of the curve' }),
+      el('p', { class: 'sub', text: 'Values are uncertain — half the traded protocols land 0.31x to 3.97x from the curve — and ranks move too. Refitting the curve on ' + f.bootstrap_n + ' resamples of the traded pool moves a typical row\'s rank by ' + f.bootstrap_median_rank_range + ' places (median p90–p10 rank range), because the value band is wide and rows\' values overlap. The top of the board is steadier: the top row stays in the top 10 in most refits. Every row shows its rank range next to its point rank, and its detail view shows how often it lands in the top 20 across the refits.' }),
       el('h3', { text: 'Coverage: what happened to all ' + DATA.total_protocols + ' protocols' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'comps' },
@@ -444,15 +475,19 @@
         el('div', null, el('span', { text: 'Curve value (size curve alone)' }), el('b', { class: 'num', text: fmtUsd(row.curve_value_usd) })),
         el('div', null, el('span', { text: 'Category offset (' + (row.category || 'Other') + ')' }), el('b', { class: 'num', text: fmtMult(row.category_multiple === undefined ? 1 : row.category_multiple) + (row.comparables ? ' (' + row.comparables + ' comps)' : ' (no offset)') })),
         el('div', null, el('span', { text: 'Breadth (' + (row.chains || []).length + ' chains)' }), el('b', { class: 'num', text: fmtMult(row.breadth_multiplier === undefined ? 1 : row.breadth_multiplier) })),
+        el('div', null, el('span', { text: 'Growth (' + fmtPct(row.change_7d) + ' over 7 days)' }), el('b', { class: 'num', text: fmtMult(row.growth_multiplier === undefined ? 1 : row.growth_multiplier) })),
+        el('div', null, el('span', { text: 'Maturity (' + fmtAge(row.age_days) + ' with no token)' }), el('b', { class: 'num', text: fmtMult(row.maturity_multiplier === undefined ? 1 : row.maturity_multiplier) })),
         el('div', null, el('span', { text: 'Confidence' }), el('b', { class: 'num', text: row.confidence === undefined ? 'n/a' : Math.round(row.confidence * 100) + '%' })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
-        el('div', null, el('span', { text: 'P25–P75 band' }), el('b', { class: 'num', text: fmtUsd(row.band_lo_usd) + ' – ' + fmtUsd(row.band_hi_usd) }))
+        el('div', null, el('span', { text: 'P25–P75 band' }), el('b', { class: 'num', text: fmtUsd(row.band_lo_usd) + ' – ' + fmtUsd(row.band_hi_usd) })),
+        el('div', null, el('span', { text: 'Rank range (bootstrap)' }), el('b', { class: 'num', text: (row.rank_lo !== undefined ? row.rank_lo + '–' + row.rank_hi + ' of ' + DATA.board_size : 'n/a') + (row.top20_share !== undefined ? ', top 20 in ' + Math.round(row.top20_share * 100) + '% of refits' : '') }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row)) + (impliedOf(row) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price, and the band is wide because half the traded protocols land ' + Math.round(Math.pow(10, DATA.fit.band_lo_log) * 100) / 100 + 'x to ' + Math.round(Math.pow(10, DATA.fit.band_hi_log) * 100) / 100 + 'x from the curve.' }),
-      el('p', { class: 'sub', text: 'Why this rank: ' + fmtUsd(row.tvl_usd) + ' of TVL on the size curve is ' + fmtUsd(row.curve_value_usd) + ', times a category offset of ' + fmtMult(row.category_multiple === undefined ? 1 : row.category_multiple) + ' and breadth of ' + fmtMult(row.breadth_multiplier === undefined ? 1 : row.breadth_multiplier) + ', ' + fmtPct(row.change_7d) + ' over 7 days, ' + fmtAge(row.age_days) + ' old with no token' + (isEarly(row) ? ', and below the $' + Math.round(DATA.floor_usd / 1e6) + 'M watchlist floor — an early find' : ' — on the watchlist') + '. Growth and age do not move the value: the backtest found they do not predict market cap.' })
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row)) + (impliedOf(row) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price, and the band is wide because half the traded protocols land ' + Math.round(Math.pow(10, DATA.fit.band_lo_log) * 100) / 100 + 'x to ' + Math.round(Math.pow(10, DATA.fit.band_hi_log) * 100) / 100 + 'x from the curve — and the rank moves too: across ' + DATA.fit.bootstrap_n + ' refits of the curve this row ranks ' + (row.rank_lo !== undefined ? row.rank_lo + '–' + row.rank_hi : 'n/a') + '.' }),
+      el('p', { class: 'sub', text: 'Why this rank: ' + fmtUsd(row.tvl_usd) + ' of TVL on the size curve is ' + fmtUsd(row.curve_value_usd) + ', times a category offset of ' + fmtMult(row.category_multiple === undefined ? 1 : row.category_multiple) + ', breadth of ' + fmtMult(row.breadth_multiplier === undefined ? 1 : row.breadth_multiplier) + ', growth of ' + fmtMult(row.growth_multiplier === undefined ? 1 : row.growth_multiplier) + ' (' + fmtPct(row.change_7d) + ' over 7 days) and maturity of ' + fmtMult(row.maturity_multiplier === undefined ? 1 : row.maturity_multiplier) + ' (' + fmtAge(row.age_days) + ' old with no token)' + (isEarly(row) ? ', and below the $' + Math.round(DATA.floor_usd / 1e6) + 'M watchlist floor — an early find' : ' — on the watchlist') + '. Growth and age enter shrunk: their full fitted slopes would cost leave-one-out accuracy, so the model carries a quarter of the growth effect and half of the maturity effect.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
+      el('p', { class: 'netted', text: nettedLine(row) }),
       el('ol', { class: 'steps' }, steps.map(function (s) {
         var at = s.indexOf(' Cost: ');
         var action = at >= 0 ? s.slice(0, at) : s;
@@ -473,8 +508,8 @@
     shell.appendChild(header());
     shell.appendChild(lede());
     shell.appendChild(controls());
-    if (state.tab === 'pre-token') shell.appendChild(spotlight());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
+    if (state.tab === 'pre-token') shell.appendChild(spotlight());
     if (state.tab === 'pre-token') shell.appendChild(modelPanel());
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
