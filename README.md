@@ -6,7 +6,7 @@
 
 Token Launch Radar — a web dashboard that tracks pre-token crypto protocols worth farming, ranked by implied value, with a verdict and a farm plan for each. It reads a sealed DefiLlama protocol snapshot (758 protocols, 2026-11-14), keeps only protocols with no token on record, and prices them off the market itself: a size curve fitted on the snapshot's traded protocols, so the ranking re-prices itself on any future snapshot with no hand-kept list of names. The watchlist (40 protocols at or above $50M TVL with no token) is the floor, never the ceiling: the early radar ranks every other rankable pre-token protocol too, for 198 ranked rows. Wrapped, staked, bridged and exchange products are excluded — a staked receipt token is not a protocol still waiting for a launch of its own.
 
-## How implied value is computed (radar-5)
+## How implied value is computed (radar-6 — value model unchanged from radar-5)
 
 ```
 log10(implied) = a_cat + b_cat x log10(tvl_usd)        (one curve per kind of protocol)
@@ -25,7 +25,7 @@ The coefficients are fitted from the snapshot on every run, not hard-coded: 94 t
 
 Median multiplicative miss — how far the predicted market cap is from the real one, in multiples:
 
-| Test | radar-5 (per-category curves) | radar-4 (one global curve) | radar-2 (flat category multiple) |
+| Test | radar-6 (per-category curves, unchanged from radar-5) | radar-4 (one global curve) | radar-2 (flat category multiple) |
 | --- | --- | --- | --- |
 | Leave-one-out, 94 traded protocols | 3.13x | 3.37x | 5.54x |
 | Walk-forward: train older, test newer | 2.35x | 2.35x | 3.48x |
@@ -35,7 +35,7 @@ Median multiplicative miss — how far the predicted market cap is from the real
 
 Per-category curves beat one global curve where it matters: leave-one-out 3.37x → 3.13x, leave-one-category-out 2.83x → 2.79x, rank correlation 0.281 → 0.312, with walk-forward unchanged at 2.35x / 2.15x. The gain is concentrated in Lending (leave-one-out 6.81x → 4.80x); Dexs and Yield get slightly worse, so the curves are shrunk and range-guarded rather than trusted raw. The numbers above are the honest ones: a 3.13x median miss is still wide, which is why every row carries its band and its bootstrap rank range instead of a single precise-looking number.
 
-Top of the board on the sealed snapshot: Bittensor dTAO (~$74.9M implied), Figure Markets Prime (~$42.9M), Sentora Curator (~$41.3M). Every row carries a 7-step farm plan derived from its own category, chains, TVL, age and verdict — never from a hand-written list of names — with the weekly action following the protocol's own mechanism, ending in a break-even and an exit rule. No step promises an airdrop. The farm book (plans.json) carries the top 6 Worth rows with their whole plans, and the research note carries two costed portfolios: $1,000 across the top 5 Worth rows and $5,000 across the top 10, each sized from the rows' own suggested capital and netted to one break-even number.
+Top of the board on the sealed snapshot: Bittensor dTAO (~$74.9M implied), Figure Markets Prime (~$42.9M), Sentora Curator (~$41.3M). Every row carries an 8-step farm plan derived from its own category, chains, TVL, age and verdict — the top six rows name the protocol's own mechanism (staking TAO into a Bittensor subnet, lending YLDS into a Figure Markets Prime pool, depositing into a Sentora-curated Morpho vault), the rest use the mechanism template for their own kind, every hold is dated from the snapshot, and every plan names the risk to watch and ends in a break-even and an exit rule. No step promises an airdrop. The table also sorts by value per dollar committed (implied value divided by the plan's capital plus gas). The farm book (plans.json) carries the top 6 Worth rows with their whole plans, and the research note carries two costed portfolios: $1,000 across the top 5 Worth rows and $5,000 across the top 10, each sized from the rows' own suggested capital and netted to one break-even number.
 
 ## Coverage: what happened to all 758 protocols
 
