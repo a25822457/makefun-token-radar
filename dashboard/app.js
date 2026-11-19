@@ -4,7 +4,7 @@
   var DATA = window.RADAR;
   if (!DATA) return;
   var app = document.getElementById('board');
-  var state = { q: '', category: 'all', chain: 'all', verdict: 'all', earlyOnly: false, tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
+  var state = { q: '', category: 'all', chain: 'all', verdict: 'all', earlyOnly: false, sort: 'implied', dir: -1, selected: null };
 
   var money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -26,6 +26,23 @@
   function fmtMult(n) {
     if (n === undefined || n === null || !isFinite(n)) return 'n/a';
     return 'x' + n.toFixed(2);
+  }
+  function fmtPerHour(n) {
+    if (n === undefined || n === null || !isFinite(n)) return 'n/a';
+    if (Math.abs(n) >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M/h';
+    if (Math.abs(n) >= 1e3) return '$' + Math.round(n / 1e3) + 'K/h';
+    return '$' + Math.round(n) + '/h';
+  }
+  function fmtDate(iso) {
+    if (!iso) return 'n/a';
+    var d = new Date(iso + 'T00:00:00Z');
+    var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return d.getUTCDate() + ' ' + months[d.getUTCMonth()] + ' ' + d.getUTCFullYear();
+  }
+  function addDays(iso, n) {
+    var d = new Date(iso + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
   }
   function impliedOf(row) {
     var curve = row.curve_value_usd === undefined ? row.tvl_usd * 0.2 : row.curve_value_usd;
@@ -71,6 +88,7 @@
   function verdictClass(v) {
     if (v === 'Worth farming') return 'verdict worth';
     if (v === 'Watch') return 'verdict watch';
+    if (v === 'Thin') return 'verdict thin';
     return 'verdict skip';
   }
 
@@ -115,8 +133,10 @@
       else if (key === 'tvl') { av = a.tvl_usd; bv = b.tvl_usd; }
       else if (key === 'growth') { av = a.change_7d === null ? -Infinity : a.change_7d; bv = b.change_7d === null ? -Infinity : b.change_7d; }
       else if (key === 'age') { av = a.age_days === null ? Infinity : a.age_days; bv = b.age_days === null ? Infinity : b.age_days; }
-      else if (key === 'verdict') { av = a.verdict === 'Worth farming' ? 0 : a.verdict === 'Watch' ? 1 : 2; bv = b.verdict === 'Worth farming' ? 0 : b.verdict === 'Watch' ? 1 : 2; }
+      else if (key === 'verdict') { av = a.verdict === 'Worth farming' ? 0 : a.verdict === 'Watch' ? 1 : a.verdict === 'Thin' ? 2 : 3; bv = b.verdict === 'Worth farming' ? 0 : b.verdict === 'Watch' ? 1 : b.verdict === 'Thin' ? 2 : 3; }
       else if (key === 'value') { av = a.value_per_dollar_usd === undefined ? 0 : a.value_per_dollar_usd; bv = b.value_per_dollar_usd === undefined ? 0 : b.value_per_dollar_usd; }
+      else if (key === 'net') { av = a.net_value_usd === undefined ? 0 : a.net_value_usd; bv = b.net_value_usd === undefined ? 0 : b.net_value_usd; }
+      else if (key === 'perhour') { av = a.dollars_per_hour_usd === undefined ? 0 : a.dollars_per_hour_usd; bv = b.dollars_per_hour_usd === undefined ? 0 : b.dollars_per_hour_usd; }
       else { av = a.implied_value_usd; bv = b.implied_value_usd; }
       if (av < bv) return -state.dir;
       if (av > bv) return state.dir;
@@ -137,19 +157,37 @@
 
   function lede() {
     var f = DATA.fit || {};
+    var top = DATA.rows[0];
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by implied value' }),
-        el('p', { text: 'The watchlist is the floor: 40 protocols with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar ranks every other rankable pre-token protocol too — ' + DATA.board_size + ' rows from ' + DATA.total_protocols + ' protocols analysed. Implied value is a model, not a promise, and never a promise of an airdrop.' }),
-        el('p', { text: 'The model: one curve per kind of protocol, not one curve for all of them — log10(market cap) = a + b x log10(TVL) with its own a and b per category (the global curve is ' + f.intercept + ' + ' + f.slope + ' x log10(TVL)), fitted on ' + f.n + ' traded protocols, plus a breadth slope and shrunk seven-day-growth and age terms. Leave-one-out median miss ' + f.loo_radar3_mult + 'x, against ' + f.loo_radar2_mult + 'x for a flat category multiple; walk-forward ' + f.walk_old_new_radar3 + 'x / ' + f.walk_new_old_radar3 + 'x. Ranks move too: refitting on ' + f.bootstrap_n + ' bootstrap resamples moves a typical row\'s rank by ' + f.bootstrap_median_rank_range + ' places — that rank range is shown on every row.' })
+        el('p', { text: 'The watchlist is the floor: 40 protocols with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar ranks every other rankable pre-token protocol too — ' + DATA.board_size + ' rows from ' + DATA.total_protocols + ' protocols analysed, every one accounted for (see Coverage). Implied value is a model, not a promise, and never a promise of an airdrop.' }),
+        el('p', { text: 'One curve per kind of protocol, fitted on ' + f.n + ' traded protocols, plus breadth and shrunk growth and age terms. Leave-one-out median miss ' + f.loo_radar3_mult + 'x; walk-forward ' + f.walk_old_new_radar3 + 'x / ' + f.walk_new_old_radar3 + 'x. Every farm plan is netted to the dollar: net value, break-even launch odds and $/hour on every row.' })
       ),
-      el('div', { class: 'facts' },
-        el('div', { class: 'fact' }, el('span', { text: 'Protocols analysed' }), el('b', { text: String(DATA.total_protocols) })),
+      el('div', { class: 'facts kpi' },
+        el('div', { class: 'fact' }, el('span', { text: 'Protocols accounted for' }), el('b', { text: String(DATA.total_protocols) })),
         el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows ranked' }), el('b', { text: String(DATA.board_size) })),
         el('div', { class: 'fact' }, el('span', { text: 'Worth farming' }), el('b', { text: String(verdictCount('Worth farming')) })),
-        el('div', { class: 'fact' }, el('span', { text: 'Watch' }), el('b', { text: String(verdictCount('Watch')) })),
-        el('div', { class: 'fact' }, el('span', { text: 'Skip' }), el('b', { text: String(verdictCount('Skip')) })),
-        el('div', { class: 'fact' }, el('span', { text: 'Already trade, set aside' }), el('b', { text: String(DATA.traded_count) }))
+        el('div', { class: 'fact' }, el('span', { text: 'Leave-one-out miss' }), el('b', { text: (f.loo_radar3_mult !== undefined ? f.loo_radar3_mult + 'x' : 'n/a') })),
+        el('div', { class: 'fact' }, el('span', { text: 'Top implied value' }), el('b', { text: top ? fmtUsd(top.implied_value_usd) : 'n/a' }))
+      )
+    );
+  }
+
+  function coverageSection() {
+    return el('section', { class: 'panel coverage' },
+      el('h2', { text: 'Coverage: where all ' + DATA.total_protocols + ' protocols went' }),
+      el('p', { class: 'sub', text: 'Nothing is unaccounted for: ' + DATA.board_size + ' ranked + ' + DATA.traded_count + ' already trade + ' + DATA.token_symbol_only_count + ' carry a token symbol with no market cap + ' + DATA.excluded_count + ' pre-token but excluded = ' + DATA.total_protocols + '.' }),
+      el('div', { class: 'table-wrap' },
+        el('table', { class: 'comps' },
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Group' }), el('th', { scope: 'col', text: 'Count' }), el('th', { scope: 'col', text: 'What it means' }))),
+          el('tbody', null, [
+            el('tr', null, el('td', { text: 'Ranked on the board' }), el('td', { class: 'num', text: String(DATA.board_size) }), el('td', { text: 'Every rankable pre-token protocol: the ' + DATA.watchlist_size + ' watchlist plus ' + DATA.early_size + ' early finds below the floor.' })),
+            el('tr', null, el('td', { text: 'Already trade' }), el('td', { class: 'num', text: String(DATA.traded_count) }), el('td', { text: 'A token on record, so their market cap is a fact and they price the curve instead of being ranked.' })),
+            el('tr', null, el('td', { text: 'Token symbol, no market cap' }), el('td', { class: 'num', text: String(DATA.token_symbol_only_count) }), el('td', { text: 'A token exists on record but no market cap is published; set aside as already tokenised.' })),
+            el('tr', null, el('td', { text: 'Pre-token but excluded' }), el('td', { class: 'num', text: String(DATA.excluded_count) }), el('td', { text: (DATA.excluded_reasons || []).map(function (x) { return x.reason + ' ' + x.count; }).join(', ') + '.' }))
+          ])
+        )
       )
     );
   }
@@ -171,20 +209,17 @@
     chainSel.addEventListener('change', function () { state.chain = chainSel.value; writeHash(); render(); });
     var verdictSel = el('select', { id: 'verdict', 'aria-label': 'Filter by verdict' },
       el('option', { value: 'all', text: 'All verdicts' }),
-      ['Worth farming', 'Watch', 'Skip'].map(function (v) { return el('option', { value: v, text: v + ' (' + verdictCount(v) + ')', selected: v === state.verdict ? 'selected' : null }); })
+      ['Worth farming', 'Watch', 'Thin', 'Skip'].map(function (v) { return el('option', { value: v, text: v + ' (' + verdictCount(v) + ')', selected: v === state.verdict ? 'selected' : null }); })
     );
     verdictSel.addEventListener('change', function () { state.verdict = verdictSel.value; writeHash(); render(); });
     var earlyBtn = el('button', { type: 'button', 'aria-pressed': state.earlyOnly ? 'true' : 'false', text: 'Early only (< $' + Math.round(DATA.floor_usd / 1e6) + 'M TVL)', onclick: function () { state.earlyOnly = !state.earlyOnly; render(); } });
-    var pre = el('button', { type: 'button', 'aria-pressed': state.tab === 'pre-token' ? 'true' : 'false', text: 'Pre-token', onclick: function () { state.tab = 'pre-token'; render(); } });
-    var live = el('button', { type: 'button', 'aria-pressed': state.tab === 'live' ? 'true' : 'false', text: 'Live token', onclick: function () { state.tab = 'live'; render(); } });
     return el('div', { class: 'controls' },
       el('div', { class: 'field' }, el('label', { for: 'q', text: 'Search' }), search),
       el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), select),
       el('div', { class: 'field' }, el('label', { for: 'chain', text: 'Chain' }), chainSel),
       el('div', { class: 'field' }, el('label', { for: 'verdict', text: 'Verdict' }), verdictSel),
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Scope' }), earlyBtn),
-      el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
-      el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
+      el('span', { class: 'count', text: rows().length + ' rows shown' })
     );
   }
 
@@ -267,7 +302,9 @@
           el('span', { class: 'sub', text: fmtUsd(r.band_lo_usd) + ' – ' + fmtUsd(r.band_hi_usd) })
         )),
         el('td', null, el('span', { class: verdictClass(r.verdict), text: r.verdict || 'Watch' })),
-        el('td', { class: 'num', text: (r.value_per_dollar_usd === undefined ? 'n/a' : '$' + Math.round(r.value_per_dollar_usd).toLocaleString('en-US')) })
+        el('td', { class: 'num', text: (r.value_per_dollar_usd === undefined ? 'n/a' : '$' + Math.round(r.value_per_dollar_usd).toLocaleString('en-US')) }),
+        el('td', { class: 'num', text: (r.net_value_usd === undefined ? 'n/a' : fmtUsd(r.net_value_usd)) }),
+        el('td', { class: 'num', text: fmtPerHour(r.dollars_per_hour_usd) })
       );
       tbody.appendChild(tr);
     });
@@ -283,31 +320,10 @@
             sortHeader('age', 'Age'),
             sortHeader('implied', 'Implied value'),
             sortHeader('verdict', 'Verdict'),
-            sortHeader('value', 'Value / $1')
+            sortHeader('value', 'Value / $1'),
+            sortHeader('net', 'Net value'),
+            sortHeader('perhour', '$/hour')
           )),
-          tbody
-        )
-      )
-    );
-  }
-
-  function liveTable() {
-    var tbody = el('tbody');
-    DATA.live.forEach(function (r) {
-      tbody.appendChild(el('tr', null,
-        el('td', { class: 'num', text: 'live' }),
-        el('td', null, el('div', { class: 'name' }, el('b', { text: r.name }), el('span', { class: 'sub', text: (r.category || 'Other') + ' on ' + (r.chains && r.chains.length ? r.chains.slice(0, 2).join(', ') : 'an unnamed chain') }))),
-        el('td', { class: 'num', text: fmtUsd(r.tvl_usd) }),
-        el('td', { class: 'num ' + (r.change_7d !== null && r.change_7d >= 0 ? 'pos' : 'neg'), text: fmtPct(r.change_7d) }),
-        el('td', { class: 'num', text: fmtUsd(r.mcap_usd) }),
-        el('td', null, el('span', { class: 'status', text: 'already trades' }))
-      ));
-    });
-    return el('div', { class: 'panel' },
-      el('div', { class: 'table-wrap' },
-        el('table', null,
-          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking.' }),
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Status' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: '7d' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Token' }))),
           tbody
         )
       )
@@ -325,7 +341,7 @@
       el('div', { class: 'formula' },
         'log10(implied) = a_cat + b_cat x log10(tvl_usd) + category offset + breadth slope x (chains - 1, centred) + growth slope x (7-day growth, centred) + maturity slope x log10(1 + age, centred)'
       ),
-      el('p', { class: 'sub', text: 'The fit uses ' + f.n + ' traded protocols (positive market cap and TVL, not an exchange, bridge or staking receipt — those tokens are not protocol launches). One curve per kind of protocol: a category with at least ' + m.percat_min_n + ' traded protocols gets its own slope and intercept, shrunk toward the global curve (intercept ' + f.intercept + ', slope ' + f.slope + '); outside the TVL range its own traded protocols cover, the category curve hands back to the global slope. Market cap grows much more slowly than TVL on the global curve: the fitted multiple is ' + fmtMult(Math.pow(10, f.intercept + (f.slope - 1) * Math.log10(5e7))) + ' at $50M of TVL and ' + fmtMult(Math.pow(10, f.intercept + (f.slope - 1) * Math.log10(5e9))) + ' at $5B. A flat multiple would overvalue the giants by an order of magnitude. The category offset is the shrunk mean residual per category (at least ' + m.min_comparables + ' comparables); the breadth slope is ' + f.breadth_slope + ' per extra chain. The growth slope is ' + f.growth_slope + ' per unit of clamped growth and the maturity slope is ' + f.maturity_slope + ' per log10(1 + age) — both fitted from the same traded protocols, then shrunk to a quarter and a half. Residual spread is ' + f.residual_sd + ' in log10, and half the traded protocols land within ' + bandLo + 'x to ' + bandHi + 'x of the curve.' }),
+      el('p', { class: 'sub', text: 'The fit uses ' + f.n + ' traded protocols (positive market cap and TVL, not an exchange, bridge or staking receipt). One curve per kind: a category with at least ' + m.percat_min_n + ' traded protocols gets its own slope and intercept, shrunk toward the global curve (intercept ' + f.intercept + ', slope ' + f.slope + '); outside the TVL range its own traded protocols cover, the category curve hands back to the global slope. A flat multiple would overvalue the giants by an order of magnitude. The category offset is the shrunk mean residual per category (at least ' + m.min_comparables + ' comparables); the breadth slope is ' + f.breadth_slope + ' per extra chain; growth ' + f.growth_slope + ' and maturity ' + f.maturity_slope + ' are fitted, then shrunk to a quarter and a half. Residual spread is ' + f.residual_sd + ' in log10, and half the traded protocols land within ' + bandLo + 'x to ' + bandHi + 'x of the curve.' }),
       el('h3', { text: 'The category curves' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'comps' },
@@ -339,7 +355,7 @@
       el('h3', { text: 'Backtest: leave-one-out and walk-forward, median multiplicative miss' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'comps' },
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Test' }), el('th', { scope: 'col', text: 'Radar-6' }), el('th', { scope: 'col', text: 'Radar-4 (one global curve)' }))),
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Test' }), el('th', { scope: 'col', text: 'Radar-7' }), el('th', { scope: 'col', text: 'Radar-4 (one global curve)' }))),
           el('tbody', null, [
             el('tr', null, el('td', { text: 'Leave-one-out, ' + f.n + ' traded protocols' }), el('td', { class: 'num', text: fmtMult(f.loo_radar3_mult) }), el('td', { class: 'num', text: fmtMult(f.loo_radar4_mult) })),
             el('tr', null, el('td', { text: 'Walk-forward: train older, test newer' }), el('td', { class: 'num', text: fmtMult(f.walk_old_new_radar3) }), el('td', { class: 'num', text: fmtMult(f.walk_old_new_radar4) })),
@@ -349,21 +365,9 @@
           ])
         )
       ),
-      el('p', { class: 'sub', text: 'What the backtest says about growth and age: their full fitted slopes are negative — fast seven-day growth mean-reverts, and an old protocol with no token carries a slightly lower multiple — so at full strength they cost leave-one-out accuracy. Shrunk to a quarter and a half they cost almost nothing (leave-one-out ' + f.loo_radar3_mult + 'x, walk-forward ' + f.walk_old_new_radar3 + 'x / ' + f.walk_new_old_radar3 + 'x), so the value carries both, at the weight the backtest supports. Both are shown on every row and both move the verdict as well: Worth farming is implied value of at least $' + Math.round(m.worth_farming_usd / 1e6) + 'M; Watch is at least $' + Math.round(m.watch_usd / 1e6) + 'M, or at least $' + Math.round(m.watch_usd / 2e6) + 'M with seven-day growth of ' + m.watch_growth_pct + '% or more; the rest is Skip. No step promises an airdrop.' }),
+      el('p', { class: 'sub', text: 'Growth and age enter shrunk — a quarter of the growth effect, half of the maturity effect — because at full strength they cost leave-one-out accuracy (fast growth mean-reverts). Worth farming is implied value of at least $' + Math.round(m.worth_farming_usd / 1e6) + 'M; Watch is at least $' + Math.round(m.watch_usd / 1e6) + 'M, or at least $' + Math.round(m.watch_usd / 2e6) + 'M with seven-day growth of ' + m.watch_growth_pct + '% or more; Thin is at least $' + Math.round(m.watch_usd / 2e6) + 'M below Watch; the rest is Skip. No step promises an airdrop.' }),
       el('h3', { text: 'Rank stability: ' + f.bootstrap_n + ' bootstrap refits of the curve' }),
-      el('p', { class: 'sub', text: 'Values are uncertain — half the traded protocols land ' + (f.band_lo_log !== undefined ? Math.round(Math.pow(10, f.band_lo_log) * 100) / 100 : '?') + 'x to ' + (f.band_hi_log !== undefined ? Math.round(Math.pow(10, f.band_hi_log) * 100) / 100 : '?') + 'x from the curve — and ranks move too. Refitting the curve on ' + f.bootstrap_n + ' resamples moves a typical row\'s rank by ' + f.bootstrap_median_rank_range + ' places (median p90–p10 rank range). The top row ranks ' + (DATA.rows[0] ? DATA.rows[0].rank_lo + '–' + DATA.rows[0].rank_hi : 'n/a') + ' and lands in the top 20 in ' + (DATA.rows[0] && DATA.rows[0].top20_share !== undefined ? Math.round(DATA.rows[0].top20_share * 100) : '?') + '% of refits; every row shows its rank range next to its point rank.' }),
-      el('h3', { text: 'Coverage: what happened to all ' + DATA.total_protocols + ' protocols' }),
-      el('div', { class: 'table-wrap' },
-        el('table', { class: 'comps' },
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Group' }), el('th', { scope: 'col', text: 'Count' }), el('th', { scope: 'col', text: 'What it means' }))),
-          el('tbody', null, [
-            el('tr', null, el('td', { text: 'Ranked on the board' }), el('td', { class: 'num', text: String(DATA.board_size) }), el('td', { text: 'Every rankable pre-token protocol: the ' + DATA.watchlist_size + ' watchlist plus ' + DATA.early_size + ' early finds below the floor.' })),
-            el('tr', null, el('td', { text: 'Already trade' }), el('td', { class: 'num', text: String(DATA.traded_count) }), el('td', { text: 'A token on record, so their market cap is a fact and they price the curve instead of being ranked.' })),
-            el('tr', null, el('td', { text: 'Token symbol, no market cap' }), el('td', { class: 'num', text: String(DATA.token_symbol_only_count) }), el('td', { text: 'A token exists on record but no market cap is published; set aside as already tokenised.' })),
-            el('tr', null, el('td', { text: 'Pre-token but excluded' }), el('td', { class: 'num', text: String(DATA.excluded_count) }), el('td', { text: (DATA.excluded_reasons || []).map(function (x) { return x.reason + ' ' + x.count; }).join(', ') + '.' }))
-          ])
-        )
-      ),
+      el('p', { class: 'sub', text: 'Refitting the curve on ' + f.bootstrap_n + ' resamples moves a typical row\'s rank by ' + f.bootstrap_median_rank_range + ' places (median p90–p10 rank range). The top row ranks ' + (DATA.rows[0] ? DATA.rows[0].rank_lo + '–' + DATA.rows[0].rank_hi : 'n/a') + ' and lands in the top 20 in ' + (DATA.rows[0] && DATA.rows[0].top20_share !== undefined ? Math.round(DATA.rows[0].top20_share * 100) : '?') + '% of refits; every row shows its rank range next to its point rank.' }),
       el('h3', { text: 'Category offsets (log10 units, shrunk)' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'comps' },
@@ -395,9 +399,9 @@
       ),
       el('button', { class: 'close', type: 'button', 'aria-label': 'Close details', text: 'Close', onclick: function () { dialog.close(); } })
     ));
-    dialog.appendChild(el('div', { class: 'verdict-banner ' + (row.verdict === 'Worth farming' ? 'worth' : row.verdict === 'Watch' ? 'watch' : 'skip') },
+    dialog.appendChild(el('div', { class: 'verdict-banner ' + (row.verdict === 'Worth farming' ? 'worth' : row.verdict === 'Watch' ? 'watch' : row.verdict === 'Thin' ? 'thin' : 'skip') },
       el('b', { text: row.verdict || 'Watch' }),
-      el('span', { text: row.verdict === 'Worth farming' ? ' — implied value of at least $' + Math.round(DATA.model.worth_farming_usd / 1e6) + 'M. Farm it first.' : row.verdict === 'Watch' ? ' — worth tracking, not first in line.' : ' — do not farm it yet; re-check it only if its TVL or growth changes.' })
+      el('span', { text: row.verdict === 'Worth farming' ? ' — implied value of at least $' + Math.round(DATA.model.worth_farming_usd / 1e6) + 'M. Farm it first.' : row.verdict === 'Watch' ? ' — worth tracking, not first in line.' : row.verdict === 'Thin' ? ' — just below Watch: farm it only at the smallest size, and only if its TVL or growth picks up.' : ' — do not farm it yet; re-check it only if its TVL or growth changes.' })
     ));
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Implied value' }),
@@ -413,15 +417,40 @@
         el('div', null, el('span', { text: 'Confidence' }), el('b', { class: 'num', text: row.confidence === undefined ? 'n/a' : Math.round(row.confidence * 100) + '%' })),
         el('div', null, el('span', { text: 'Value per $1 committed (capital + gas)' }), el('b', { class: 'num', text: row.value_per_dollar_usd === undefined ? 'n/a' : '$' + Math.round(row.value_per_dollar_usd).toLocaleString('en-US') })),
         el('div', null, el('span', { text: 'Implied value' }), el('b', { class: 'num', text: fmtUsd(row.implied_value_usd) })),
+        el('div', null, el('span', { text: 'Net value (implied less capital + gas)' }), el('b', { class: 'num', text: row.net_value_usd === undefined ? 'n/a' : fmtUsd(row.net_value_usd) })),
+        el('div', null, el('span', { text: 'Break-even launch odds' }), el('b', { class: 'num', text: row.break_even_launch_pct === undefined ? 'n/a' : row.break_even_launch_pct + '% (1 in ' + Math.round(100 / Math.max(row.break_even_launch_pct, 0.000001)).toLocaleString('en-US') + ')' })),
+        el('div', null, el('span', { text: 'Active hours / value per hour' }), el('b', { class: 'num', text: (row.active_hours === undefined ? 'n/a' : row.active_hours + 'h') + ' / ' + fmtPerHour(row.dollars_per_hour_usd) })),
         el('div', null, el('span', { text: 'P25–P75 band' }), el('b', { class: 'num', text: fmtUsd(row.band_lo_usd) + ' – ' + fmtUsd(row.band_hi_usd) })),
         el('div', null, el('span', { text: 'Rank range (bootstrap)' }), el('b', { class: 'num', text: (row.rank_lo !== undefined ? row.rank_lo + '–' + row.rank_hi + ' of ' + DATA.board_size : 'n/a') + (row.top20_share !== undefined ? ', top 20 in ' + Math.round(row.top20_share * 100) + '% of refits' : '') }))
       ),
-      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row)) + (impliedOf(row) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price: half the traded protocols land ' + Math.round(Math.pow(10, DATA.fit.band_lo_log) * 100) / 100 + 'x to ' + Math.round(Math.pow(10, DATA.fit.band_hi_log) * 100) / 100 + 'x from the curve, and across ' + DATA.fit.bootstrap_n + ' refits this row ranks ' + (row.rank_lo !== undefined ? row.rank_lo + '–' + row.rank_hi : 'n/a') + '.' }),
-      el('p', { class: 'sub', text: 'Why this rank: ' + fmtUsd(row.tvl_usd) + ' of TVL on the size curve is ' + fmtUsd(row.curve_value_usd) + ', times a category offset of ' + fmtMult(row.category_multiple === undefined ? 1 : row.category_multiple) + ', breadth of ' + fmtMult(row.breadth_multiplier === undefined ? 1 : row.breadth_multiplier) + ', growth of ' + fmtMult(row.growth_multiplier === undefined ? 1 : row.growth_multiplier) + ' (' + fmtPct(row.change_7d) + ' over 7 days) and maturity of ' + fmtMult(row.maturity_multiplier === undefined ? 1 : row.maturity_multiplier) + ' (' + fmtAge(row.age_days) + ' old with no token)' + (isEarly(row) ? ', and below the $' + Math.round(DATA.floor_usd / 1e6) + 'M watchlist floor — an early find' : ' — on the watchlist') + '. Growth and age enter shrunk — a quarter of the growth effect, half of the maturity effect.' })
+      el('p', { class: 'sub', text: 'Model ' + DATA.model_version + ': the same function scores every protocol. The page recomputes this row as ' + fmtUsd(impliedOf(row)) + (impliedOf(row) === row.implied_value_usd ? ', the same number board.json carries.' : ', which differs from the board: the data would be stale.') + ' This is an estimate, not a price: half the traded protocols land ' + Math.round(Math.pow(10, DATA.fit.band_lo_log) * 100) / 100 + 'x to ' + Math.round(Math.pow(10, DATA.fit.band_hi_log) * 100) / 100 + 'x from the curve, and across ' + DATA.fit.bootstrap_n + ' refits this row ranks ' + (row.rank_lo !== undefined ? row.rank_lo + '–' + row.rank_hi : 'n/a') + '.' })
     ));
+    var comps = row.knn_comps || [];
+    if (comps.length > 0) {
+      dialog.appendChild(el('section', { class: 'detail-section' },
+        el('h3', { text: 'Nearest traded comps — a second opinion' }),
+        el('p', { class: 'sub', text: 'The closest traded protocols (same category first, then log TVL, then chain count), each priced at its own market-cap / TVL multiple. The median implies ' + fmtUsd(row.comps_value_usd) + ' against the curve value of ' + fmtUsd(row.curve_value_usd) + '. Display only: k-NN was tested against the curve on leave-one-out (3.25x vs 3.13x) and is worse, so it never moves a rank.' }),
+        el('div', { class: 'table-wrap' },
+          el('table', { class: 'comps' },
+            el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Comp' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Implies' }))),
+            el('tbody', null, comps.map(function (c) {
+              return el('tr', null, el('td', { text: c.name }), el('td', { class: 'num', text: fmtUsd(c.tvl_usd) }), el('td', { class: 'num', text: fmtUsd(c.mcap_usd) }), el('td', { class: 'num', text: fmtUsd(c.comp_value_usd) }));
+            }))
+          )
+        )
+      ));
+    }
+    var holdEnd = addDays(DATA.as_of, row.hold_days || 0);
     dialog.appendChild(el('section', { class: 'detail-section' },
       el('h3', { text: 'Farm plan' }),
       el('p', { class: 'netted', text: row.netted || '' }),
+      el('div', { class: 'timeline' },
+        el('div', { class: 'tl-step' }, el('b', { text: 'Set up' }), el('span', { text: fmtDate(DATA.as_of) })),
+        el('div', { class: 'tl-step' }, el('b', { text: 'Act' }), el('span', { text: fmtDate(DATA.as_of) })),
+        el('div', { class: 'tl-step' }, el('b', { text: 'Check weekly' }), el('span', { text: 'from ' + fmtDate(addDays(DATA.as_of, 7)) })),
+        el('div', { class: 'tl-step' }, el('b', { text: 'Hold until' }), el('span', { text: fmtDate(holdEnd) })),
+        el('div', { class: 'tl-step' }, el('b', { text: 'Claim / exit' }), el('span', { text: fmtDate(holdEnd) }))
+      ),
       el('ol', { class: 'steps' }, steps.map(function (s) {
         var at = s.indexOf(' Cost: ');
         var action = at >= 0 ? s.slice(0, at) : s;
@@ -441,10 +470,11 @@
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
+    shell.appendChild(coverageSection());
     shell.appendChild(controls());
-    shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
-    if (state.tab === 'pre-token') shell.appendChild(spotlight());
-    if (state.tab === 'pre-token') shell.appendChild(modelPanel());
+    shell.appendChild(boardTable());
+    shell.appendChild(spotlight());
+    shell.appendChild(modelPanel());
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
     if (!dialog.isConnected) app.appendChild(dialog);
