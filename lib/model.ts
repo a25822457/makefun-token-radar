@@ -137,7 +137,7 @@ export const MODEL: ModelConstants = {
 };
 
 /** The model version the dashboard prints and the rules quote. */
-export const MODEL_VERSION = 'radar-7';
+export const MODEL_VERSION = 'radar-8';
 
 /** One farm step: what to do, what it costs, how long it takes. */
 export interface FarmStep {
@@ -266,6 +266,12 @@ export interface CurveFit {
   /** Residual quartiles, in log10 units: half the traded protocols land inside. */
   band_lo_log: number;
   band_hi_log: number;
+  /** Range honesty, out of sample: the share of leave-one-out predictions
+      whose real market cap falls inside the printed P25–P75 band, and
+      inside the P10–P90 band (residual deciles of the full fit). A band
+      that claims 50% / 80% should cover about that share. */
+  band_cover_p25_p75: number;
+  band_cover_p10_p90: number;
   /** Category offsets, in log10 units, with their comparable counts. */
   category_offsets: { category: string; offset: number; count: number }[];
   /** Breadth: residual slope per extra chain, and the centring mean. */
@@ -692,6 +698,30 @@ export function fitDiagnostics(
       locoErrs4.push(Math.abs(fittedLogMcap(p, fitted4, model4, snapshot.as_of) - log10(p.mcap_usd!)));
     }
   }
+  // Range honesty, out of sample: the band the board prints is the full
+  // fit's residual quartiles (P25–P75) and deciles (P10–P90). Check it
+  // against the leave-one-out predictions, which never saw the protocol
+  // they predict: the share of real market caps that fall inside the
+  // printed band. A band that claims 50% / 80% should cover about that
+  // share; a band that covered far less would be a printed range the
+  // evidence does not support.
+  const fullFitted = fitCurve(pool, snapshot.as_of, model);
+  const fullRes = [...fullFitted.residuals].sort((a, b) => a - b);
+  const resQuantile = (p: number): number =>
+    fullRes.length === 0 ? 0 : fullRes[Math.min(fullRes.length - 1, Math.floor(p * fullRes.length))]!;
+  const q10 = resQuantile(0.1);
+  const q25 = resQuantile(0.25);
+  const q75 = resQuantile(0.75);
+  const q90 = resQuantile(0.9);
+  let in2575 = 0;
+  let in1090 = 0;
+  for (let i = 0; i < looPred.length; i++) {
+    const act = looAct[i]!;
+    if (act >= looPred[i]! + q25 && act <= looPred[i]! + q75) in2575++;
+    if (act >= looPred[i]! + q10 && act <= looPred[i]! + q90) in1090++;
+  }
+  const bandCoverP25P75 = looPred.length > 0 ? in2575 / looPred.length : 0;
+  const bandCoverP10P90 = looPred.length > 0 ? in1090 / looPred.length : 0;
   return {
     loo_radar3_mult: loo3.length > 0 ? 10 ** median(loo3) : 0,
     loo_radar4_mult: loo4.length > 0 ? 10 ** median(loo4) : 0,
@@ -706,6 +736,8 @@ export function fitDiagnostics(
     loo_spearman_radar4: looPred4.length > 1 ? spearman(looPred4, looAct) : 0,
     loco_mult: locoErrs.length > 0 ? 10 ** median(locoErrs) : 0,
     loco_mult_radar4: locoErrs4.length > 0 ? 10 ** median(locoErrs4) : 0,
+    band_cover_p25_p75: Math.round(bandCoverP25P75 * 1000) / 1000,
+    band_cover_p10_p90: Math.round(bandCoverP10P90 * 1000) / 1000,
     per_category_curves: [],
   };
 }
@@ -1666,6 +1698,8 @@ export function buildRadar(
       loo_spearman_radar4: Math.round(diagnostics.loo_spearman_radar4 * 1000) / 1000,
       loco_mult: Math.round(diagnostics.loco_mult * 100) / 100,
       loco_mult_radar4: Math.round(diagnostics.loco_mult_radar4 * 100) / 100,
+      band_cover_p25_p75: diagnostics.band_cover_p25_p75,
+      band_cover_p10_p90: diagnostics.band_cover_p10_p90,
       per_category_curves: [...fitted.perCategory.entries()]
         .map(([category, c]) => ({
           category,
@@ -1983,7 +2017,7 @@ export function dashboardReadme(radar: RadarData): string {
       ? ''
       : `\n## Worked example: rank 1, ${first.name}\n\n${first.name} (${first.category ?? 'no category'}) records no token, holds TVL ${fmtUsd(first.tvl_usd)}, seven-day growth ${first.change_7d === null ? 'unreported' : `${first.change_7d}%`}, listed ${first.age_days === null ? 'at an unknown date' : `${first.age_days} days ago`}. Its curve value is ${fmtUsd(first.curve_value_usd)}; multiplied by its category, breadth, growth and maturity terms, the implied value is ${fmtUsd(first.implied_value_usd)}, with a band of ${fmtUsd(first.band_lo_usd)} to ${fmtUsd(first.band_hi_usd)} and a bootstrap rank range of ${first.rank_lo}–${first.rank_hi} (top 20 in ${Math.round((first.top20_share ?? 0) * 100)}% of refits). Its nearest traded comps imply ${fmtUsd(first.comps_value_usd)} at the median — a second opinion that sits next to the curve value. Netted: $${first.capital_usd} capital and about $${4 + 2 * Math.max(1, Math.round(first.hold_days / 7)) + (first.capital_usd >= 150 ? 4 : 0)} gas over ${first.hold_days} days, so the net value is ${fmtUsd(first.net_value_usd)}, the break-even launch odds are ${first.break_even_launch_pct}% (one launch in ${Math.round(100 / Math.max(first.break_even_launch_pct, 0.000001)).toLocaleString('en-US')} pays for the farm), and the value per active hour is ${fmtPerHour(first.dollars_per_hour_usd)}. Every number in this paragraph is the page's own arithmetic, recomputed from the snapshot figures.`;
   return [
-    '# Token Launch Radar — research note (radar-7)',
+    '# Token Launch Radar — research note (radar-8)',
     '',
     '## KPI strip',
     '',
@@ -1995,7 +2029,7 @@ export function dashboardReadme(radar: RadarData): string {
     '',
     `A radar for pre-token protocols, ranked by implied value: what a token would be worth if the protocol's record stayed as it is, and what a reader should do to farm it. ${radar.board_size} rows from ${radar.total_protocols} protocols in the sealed DefiLlama snapshot of ${radar.as_of}; every one of the ${radar.watchlist_size} watchlist protocols is ranked, plus ${radar.early_size} early finds. ${radar.traded_count} protocols already trade: their market caps price the curves, they are not ranked.`,
     '',
-    `The walk-forward test is blind: the curve is fitted only on the older (or newer) half and scored on the other, so it never sees the protocols it is tested on. For scale, the best-known rival states leave-one-out 3.4x and walk-forward 2.3x on its own fit; this radar recomputes ${f.loo_radar3_mult}x and ${f.walk_old_new_radar3}x / ${f.walk_new_old_radar3}x on its own 94-protocol fit — their stated numbers, not the same pool. The board is dynamic, not hand-kept: drop 20% of the traded pool at random and the rank order holds at 0.994 with the top 10 identical; raise every TVL by 1.5x and the ranking is exactly unchanged (Spearman 1.000), because the curve shifts with the figures it prices; move the snapshot date 90 days forward and the top 10 are still identical.`,
+    `The walk-forward test is blind: the curve is fitted only on the older (or newer) half and scored on the other, so it never sees the protocols it is tested on. This radar recomputes leave-one-out ${f.loo_radar3_mult}x and walk-forward ${f.walk_old_new_radar3}x / ${f.walk_new_old_radar3}x on its own 94-protocol fit. The board is dynamic, not hand-kept: drop 20% of the traded pool at random and the rank order holds at 0.994 with the top 10 identical; raise every TVL by 1.5x and the ranking is exactly unchanged (Spearman 1.000), because the curve shifts with the figures it prices; move the snapshot date 90 days forward and the top 10 are still identical.`,
     '',
     '## Coverage: where all 758 protocols went',
     '',
@@ -2022,12 +2056,13 @@ export function dashboardReadme(radar: RadarData): string {
     `- Leave-one-category-out (train on every kind but one, predict the held-out kind): ${f.loco_mult}x — the curves generalise to kinds they have never seen.`,
     `- Bootstrap: refitting the curve on ${f.bootstrap_n} resamples moves a typical row's rank by ${f.bootstrap_median_rank_range} places (median p90-p10 rank range) — ranks move too, because the value band is wide and rows' values overlap. The top row ranks ${radar.rows[0]?.rank_lo}–${radar.rows[0]?.rank_hi} and lands in the top 20 in ${Math.round((radar.rows[0]?.top20_share ?? 0) * 100)}% of refits; every row carries its rank range next to its point rank.`,
     `- Half the traded protocols land within ${Math.round(10 ** f.band_lo_log * 100) / 100}x to ${Math.round(10 ** f.band_hi_log * 100) / 100}x of the curve; that band is shown on every row.`,
+    `- Is the printed range honest? Out of sample, ${Math.round(f.band_cover_p25_p75 * 100)}% of the traded protocols' real market caps fall inside the printed P25–P75 band (a band that claims 50% should cover about half), and ${Math.round(f.band_cover_p10_p90 * 100)}% fall inside the P10–P90 band (which claims 80%). The band is the full fit's residual quartiles and deciles, checked against leave-one-out predictions that never saw the protocol they predict.`,
     '',
     '## What was tested and dropped',
     '',
     `- Median (LAD) regression instead of OLS: leave-one-out 3.30x, but walk-forward 2.67x / 2.30x — worse where it matters, dropped. Huber robust regression: 3.42x leave-one-out, dropped. A piecewise log-log curve and a quadratic log-log curve: 3.55x and 3.54x, dropped. Fitting only on traded protocols above $20M of TVL: the rank correlation collapses, dropped. A two-stage model (probability of ever launching times value if launched): the launch-probability fit is weak (AUC 0.65 on this snapshot) and the top 10 would compress into a $6M–$31M expected-value range, so the board keeps the value-if-launched ranking and says so. Expanding the board into the 144 excluded pre-token rows (wrapped, staked, bridged, exchange products): the biggest would sit at the top — WBTC at $112M — and those are products of tokens that already trade, not protocols still to come, so they stay excluded.`,
     '',
-    `- New model families, tested and dropped: k-nearest neighbours (k=8/12/20: 3.85x / 3.25x / 3.32x), local-linear regression (0.5/1.0: 3.67x / 3.52x), OLS plus TVL-by-age (3.38x) or TVL-by-growth (3.65x) interactions, and a per-category plus kNN ensemble (3.39x) — all worse than the per-category OLS on leave-one-out. Re-verified this round (radar-7): kNN k=8/12/20 gives 3.85x / 3.25x / 3.32x, walk-forward 2.90/3.39x, 2.49/3.21x, 2.58/3.61x, rank correlation 0.148 / 0.209 / 0.196, against the curve's 3.13x, 2.35/2.15x, 0.312 — worse on every test, so k-NN never enters the ranking. It is kept as a display: every row shows its 3–5 nearest traded protocols with the value each would imply, and the median as a second opinion. A second launch-probability model with category launch rates: 5-fold AUC 0.708, and the category base rate alone scores 0.730 — no launch probability enters the ranking.`,
+    `- New model families, tested and dropped: k-nearest neighbours (k=8/12/20: 3.85x / 3.25x / 3.32x), local-linear regression (0.5/1.0: 3.67x / 3.52x), OLS plus TVL-by-age (3.38x) or TVL-by-growth (3.65x) interactions, and a per-category plus kNN ensemble (3.39x) — all worse than the per-category OLS on leave-one-out. Re-verified this round (radar-8): kNN k=8/12/20 gives 3.85x / 3.25x / 3.32x, walk-forward 2.90/3.39x, 2.49/3.21x, 2.58/3.61x, rank correlation 0.148 / 0.209 / 0.196, against the curve's 3.13x, 2.35/2.15x, 0.312 — worse on every test, so k-NN never enters the ranking. It is kept as a display: every row shows its 3–5 nearest traded protocols with the value each would imply, and the median as a second opinion. A second launch-probability model with category launch rates: 5-fold AUC 0.708, and the category base rate alone scores 0.730 — no launch probability enters the ranking.`,
     '',
     '## The farm plans',
     '',
@@ -2037,7 +2072,7 @@ export function dashboardReadme(radar: RadarData): string {
     '',
     '## How to read the page',
     '',
-    'The KPI strip comes first, then the coverage section (where all 758 protocols went), then the board table: rank, protocol, TVL, 7-day growth, age, implied value with its band and bootstrap rank range, verdict, value per dollar, net value and $/hour. It sorts on every column and filters by search, category, chain, verdict and scope. Select a row for its detail view: every input to its value, the net value with its break-even launch odds and $/hour, the nearest traded comps with the value each implies, the rank range, the value-per-dollar figure, the farm plan as a dated timeline, and the plan itself. The farm book lists the Worth rows and the two portfolios; the model panel shows the formula, the per-category curves, the backtest table and the category offsets. A separate Live token view lists the protocols that already trade, set aside from the ranking.',
+    'The KPI strip comes first, then the coverage section (where all 758 protocols went), then the board table: rank, protocol, TVL, 7-day growth, age, implied value with its band and bootstrap rank range, verdict, value per dollar, net value and $/hour. It sorts on every column and filters by search, category, chain, verdict and scope. Expand any row to see its farm plan inline in the table, or select a row for its detail view: every input to its value, the net value with its break-even launch odds and $/hour, the nearest traded comps with the value each implies, the rank range, the value-per-dollar figure, the farm plan as a dated timeline, and the plan itself. The farm book lists the Worth rows and the two portfolios; the model panel shows the formula, the per-category curves, the backtest table, the range-honesty check and the category offsets. A separate Live token view lists the protocols that already trade, set aside from the ranking.',
     '',
     'Implied value is a model, not a price, and never a promise of an airdrop.',
     '',
