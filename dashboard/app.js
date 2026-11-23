@@ -4,7 +4,7 @@
   var DATA = window.RADAR;
   if (!DATA) return;
   var app = document.getElementById('board');
-  var state = { q: '', category: 'all', chain: 'all', verdict: 'all', earlyOnly: false, sort: 'implied', dir: -1, selected: null };
+  var state = { q: '', category: 'all', chain: 'all', verdict: 'all', earlyOnly: false, sort: 'implied', dir: -1, selected: null, expanded: {} };
 
   var money = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -175,20 +175,27 @@
   }
 
   function coverageSection() {
+    var groups = [
+      { label: 'Ranked on the board', count: DATA.board_size, cls: 'cov-ranked', note: 'Every rankable pre-token protocol: the ' + DATA.watchlist_size + ' watchlist plus ' + DATA.early_size + ' early finds below the floor.' },
+      { label: 'Already trade', count: DATA.traded_count, cls: 'cov-traded', note: 'A token on record, so their market cap is a fact and they price the curve instead of being ranked.' },
+      { label: 'Token symbol, no market cap', count: DATA.token_symbol_only_count, cls: 'cov-symbol', note: 'A token exists on record but no market cap is published; set aside as already tokenised.' },
+      { label: 'Pre-token but excluded', count: DATA.excluded_count, cls: 'cov-excluded', note: (DATA.excluded_reasons || []).map(function (x) { return x.reason + ' ' + x.count; }).join(', ') + '.' }
+    ];
+    var total = DATA.total_protocols || 0;
     return el('section', { class: 'panel coverage' },
       el('h2', { text: 'Coverage: where all ' + DATA.total_protocols + ' protocols went' }),
       el('p', { class: 'sub', text: 'Nothing is unaccounted for: ' + DATA.board_size + ' ranked + ' + DATA.traded_count + ' already trade + ' + DATA.token_symbol_only_count + ' carry a token symbol with no market cap + ' + DATA.excluded_count + ' pre-token but excluded = ' + DATA.total_protocols + '.' }),
-      el('div', { class: 'table-wrap' },
-        el('table', { class: 'comps' },
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Group' }), el('th', { scope: 'col', text: 'Count' }), el('th', { scope: 'col', text: 'What it means' }))),
-          el('tbody', null, [
-            el('tr', null, el('td', { text: 'Ranked on the board' }), el('td', { class: 'num', text: String(DATA.board_size) }), el('td', { text: 'Every rankable pre-token protocol: the ' + DATA.watchlist_size + ' watchlist plus ' + DATA.early_size + ' early finds below the floor.' })),
-            el('tr', null, el('td', { text: 'Already trade' }), el('td', { class: 'num', text: String(DATA.traded_count) }), el('td', { text: 'A token on record, so their market cap is a fact and they price the curve instead of being ranked.' })),
-            el('tr', null, el('td', { text: 'Token symbol, no market cap' }), el('td', { class: 'num', text: String(DATA.token_symbol_only_count) }), el('td', { text: 'A token exists on record but no market cap is published; set aside as already tokenised.' })),
-            el('tr', null, el('td', { text: 'Pre-token but excluded' }), el('td', { class: 'num', text: String(DATA.excluded_count) }), el('td', { text: (DATA.excluded_reasons || []).map(function (x) { return x.reason + ' ' + x.count; }).join(', ') + '.' }))
-          ])
-        )
-      )
+      el('div', { class: 'cov-bar', role: 'img', 'aria-label': 'Coverage: ' + groups.map(function (g) { return g.label + ' ' + g.count; }).join(', ') },
+        groups.map(function (g) { return el('i', { class: 'cov-seg ' + g.cls, style: 'width:' + (total ? Math.max(1, Math.round(g.count / total * 1000) / 10) + '%' : '0') }); })
+      ),
+      el('ul', { class: 'cov-legend' }, groups.map(function (g) {
+        return el('li', null,
+          el('i', { class: 'cov-dot ' + g.cls, 'aria-hidden': 'true' }),
+          el('b', { text: g.label }),
+          el('span', { class: 'num', text: String(g.count) + ' (' + (total ? Math.round(g.count / total * 100) : 0) + '%)' }),
+          el('span', { class: 'sub', text: g.note })
+        );
+      }))
     );
   }
 
@@ -268,6 +275,30 @@
     );
   }
 
+  function planRow(r) {
+    var steps = r.farm_steps || [];
+    return el('tr', { class: 'plan-row' },
+      el('td', { colspan: '11' },
+        el('div', { class: 'inline-plan' },
+          el('div', { class: 'inline-plan-head' },
+            el('b', { text: 'Farm plan — ' + r.name }),
+            el('span', { class: 'netted', text: r.netted || '' })
+          ),
+          el('table', { class: 'plan-steps' },
+            el('thead', null, el('tr', null, el('th', { scope: 'col', text: '#' }), el('th', { scope: 'col', text: 'Step' }), el('th', { scope: 'col', text: 'Cost / time' }))),
+            el('tbody', null, steps.map(function (s, i) {
+              var at = s.indexOf(' Cost: ');
+              var action = at >= 0 ? s.slice(0, at) : s;
+              var tail = at >= 0 ? s.slice(at + 1) : '';
+              return el('tr', null, el('td', { class: 'num', text: String(i + 1) }), el('td', { text: action }), el('td', { class: 'num', text: tail }));
+            }))
+          ),
+          el('p', { class: 'sub', text: 'Select the row for the full detail view: model breakdown, nearest comps and the dated timeline.' })
+        )
+      )
+    );
+  }
+
   function boardTable() {
     var list = sortedRows(rows());
     if (list.length === 0) {
@@ -288,6 +319,7 @@
         onclick: function () { openDetail(r.slug); },
         onkeydown: function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDetail(r.slug); } }
       },
+        el('td', { class: 'plan-toggle-cell' }, el('button', { class: 'plan-toggle', type: 'button', 'aria-expanded': state.expanded[r.slug] ? 'true' : 'false', 'aria-label': (state.expanded[r.slug] ? 'Collapse' : 'Expand') + ' farm plan for ' + r.name, text: state.expanded[r.slug] ? '−' : '+', onclick: function (e) { e.stopPropagation(); if (state.expanded[r.slug]) delete state.expanded[r.slug]; else state.expanded[r.slug] = true; render(); } })),
         el('td', { class: 'num' }, el('div', { text: String(r.rank) }), el('div', { class: 'sub rankrange', text: (r.rank_lo !== undefined && r.rank_hi !== undefined) ? 'range ' + r.rank_lo + '–' + r.rank_hi : '' })),
         el('td', null, el('div', { class: 'name' },
           el('b', { text: r.name }),
@@ -307,12 +339,14 @@
         el('td', { class: 'num', text: fmtPerHour(r.dollars_per_hour_usd) })
       );
       tbody.appendChild(tr);
+      if (state.expanded[r.slug]) tbody.appendChild(planRow(r));
     });
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Pre-token protocols, strongest implied value first. Select a row for its model, verdict and farm plan.' }),
+          el('caption', { class: 'sub', text: 'Pre-token protocols, strongest implied value first. Select a row for its model, verdict and farm plan, or expand a row to see its farm plan inline.' }),
           el('thead', null, el('tr', null,
+            el('th', { scope: 'col', class: 'plan-col', text: '' }),
             sortHeader('implied', 'Rank'),
             sortHeader('name', 'Protocol'),
             sortHeader('tvl', 'TVL'),
@@ -355,7 +389,7 @@
       el('h3', { text: 'Backtest: leave-one-out and walk-forward, median multiplicative miss' }),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'comps' },
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Test' }), el('th', { scope: 'col', text: 'Radar-7' }), el('th', { scope: 'col', text: 'Radar-4 (one global curve)' }))),
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Test' }), el('th', { scope: 'col', text: (DATA.model_version ? DATA.model_version.charAt(0).toUpperCase() + DATA.model_version.slice(1) : 'Radar-8') }), el('th', { scope: 'col', text: 'Radar-4 (one global curve)' }))),
           el('tbody', null, [
             el('tr', null, el('td', { text: 'Leave-one-out, ' + f.n + ' traded protocols' }), el('td', { class: 'num', text: fmtMult(f.loo_radar3_mult) }), el('td', { class: 'num', text: fmtMult(f.loo_radar4_mult) })),
             el('tr', null, el('td', { text: 'Walk-forward: train older, test newer' }), el('td', { class: 'num', text: fmtMult(f.walk_old_new_radar3) }), el('td', { class: 'num', text: fmtMult(f.walk_old_new_radar4) })),
@@ -366,6 +400,8 @@
         )
       ),
       el('p', { class: 'sub', text: 'Growth and age enter shrunk — a quarter of the growth effect, half of the maturity effect — because at full strength they cost leave-one-out accuracy (fast growth mean-reverts). Worth farming is implied value of at least $' + Math.round(m.worth_farming_usd / 1e6) + 'M; Watch is at least $' + Math.round(m.watch_usd / 1e6) + 'M, or at least $' + Math.round(m.watch_usd / 2e6) + 'M with seven-day growth of ' + m.watch_growth_pct + '% or more; Thin is at least $' + Math.round(m.watch_usd / 2e6) + 'M below Watch; the rest is Skip. No step promises an airdrop.' }),
+      el('h3', { text: 'Is the printed range honest?' }),
+      el('p', { class: 'sub', text: 'Every row prints a P25–P75 band. Out of sample, ' + Math.round((f.band_cover_p25_p75 || 0) * 100) + '% of the traded protocols\' real market caps fall inside that band — a band that claims 50% should cover about half — and ' + Math.round((f.band_cover_p10_p90 || 0) * 100) + '% fall inside the P10–P90 band, which claims 80%. The band is the full fit\'s residual quartiles and deciles, checked against leave-one-out predictions that never saw the protocol they predict. A band that covered far less would be a printed range the evidence does not support.' }),
       el('h3', { text: 'Rank stability: ' + f.bootstrap_n + ' bootstrap refits of the curve' }),
       el('p', { class: 'sub', text: 'Refitting the curve on ' + f.bootstrap_n + ' resamples moves a typical row\'s rank by ' + f.bootstrap_median_rank_range + ' places (median p90–p10 rank range). The top row ranks ' + (DATA.rows[0] ? DATA.rows[0].rank_lo + '–' + DATA.rows[0].rank_hi : 'n/a') + ' and lands in the top 20 in ' + (DATA.rows[0] && DATA.rows[0].top20_share !== undefined ? Math.round(DATA.rows[0].top20_share * 100) : '?') + '% of refits; every row shows its rank range next to its point rank.' }),
       el('h3', { text: 'Category offsets (log10 units, shrunk)' }),
