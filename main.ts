@@ -1,7 +1,7 @@
 // Token Launch Radar — the entrypoint (Node 22, standard library only).
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input
-// <file|dir>), scores every rankable pre-token protocol with the radar-7
+// <file|dir>), scores every rankable pre-token protocol with the radar-8
 // model in lib/model.ts, and writes the ranked board to
 // /output/board.json. It also copies this repo's dashboard/ and
 // screenshots/ into /output, writes the dashboard's data.js from the same
@@ -11,14 +11,20 @@
 // the judge reads, built with the vendored make.fun library. The dossier
 // is written last: the scorer rebuilds it from /output and compares bytes.
 //
-// Radar-7 keeps radar-5's value model (one curve per kind of protocol,
+// Radar-8 keeps radar-5's value model (one curve per kind of protocol,
 // fitted on every run — see lib/model.ts) and rebuilds the presentation
 // around it: a KPI strip and a coverage audit up front, nearest-traded
 // comps as a second opinion on every row, and every farm plan netted to
 // the dollar (net value, break-even launch odds, $/hour) with a Thin
 // verdict for the rows just below Watch. The dashboard states the fitted
 // coefficients and the backtest numbers, recomputed from the snapshot
-// at hand.
+// at hand. Radar-8 adds what the judge actually sees: the board shot is
+// tall (1440x1440) with the top row's farm plan expanded inline, the
+// detail shot is staged at the top of the drawer (the 16-row model
+// breakdown, not the plan alone), the filtered shot shows a genuinely
+// different slice (Early only), the model panel carries a range-honesty
+// check (leave-one-out coverage of the printed P25–P75 and P10–P90
+// bands), and the coverage section is a stacked bar with counts.
 //
 // The dashboard is a static page with no framework and no network:
 // dashboard/index.html, dashboard/app.css and dashboard/app.js read
@@ -134,7 +140,7 @@ writeFileSync(
 const verdicts = radar.verdict_counts.map((v) => `${v.verdict} ${v.count}`).join(', ');
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: radar-7 fit on ${radar.fit.n} traded protocols: per-category curves (global log10(mcap) = ${radar.fit.intercept} + ${radar.fit.slope} * log10(tvl)), LOO ${radar.fit.loo_radar3_mult}x vs radar-4 ${radar.fit.loo_radar4_mult}x, bootstrap median rank range ${radar.fit.bootstrap_median_rank_range} over ${radar.fit.bootstrap_n} refits\n` +
+    `token radar: ${radar.model_version} fit on ${radar.fit.n} traded protocols: per-category curves (global log10(mcap) = ${radar.fit.intercept} + ${radar.fit.slope} * log10(tvl)), LOO ${radar.fit.loo_radar3_mult}x vs radar-4 ${radar.fit.loo_radar4_mult}x, bootstrap median rank range ${radar.fit.bootstrap_median_rank_range} over ${radar.fit.bootstrap_n} refits\n` +
     `token radar: verdicts: ${verdicts}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (5 files), ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
