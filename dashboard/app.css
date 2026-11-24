@@ -74,7 +74,7 @@ tbody tr[data-selected="true"]{background:color-mix(in srgb,var(--accent) 8%,var
 .verdict-banner.watch{background:color-mix(in srgb,var(--accent) 10%,var(--surface));}
 .verdict-banner.skip{color:var(--muted);}
 .model{display:grid;gap:var(--c);margin-top:var(--d);padding:var(--e);}
-.formula{color:var(--muted);font-family:var(--fn);font-size:13px;line-height:1.7;overflow-wrap:anywhere;}
+.formula{color:var(--muted);font-family:var(--fn);font-size:13px;line-height:1.7;overflow-wrap:anywhere;white-space:pre-line;}
 .empty{display:grid;gap:var(--c);justify-items:center;padding:var(--g) var(--e);text-align:center;}
 .empty p{color:var(--muted);}
 .button{background:var(--surface);border:1px solid var(--border);border-radius:var(--rc);min-height:36px;padding:0 var(--d);}
@@ -110,7 +110,7 @@ tbody tr[data-selected="true"]{background:color-mix(in srgb,var(--accent) 8%,var
 .field input{min-width:0;width:100%;}
 .top10{grid-template-columns:repeat(2,minmax(0,1fr));}
 }
-/* v8: inline farm plan expansion in the board table */
+/* v9: inline farm plan expansion in the board table */
 .plan-col{width:36px;}
 .plan-toggle-cell{width:36px;}
 .plan-toggle{background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--accent);font-family:var(--fn);font-size:15px;font-weight:600;height:26px;line-height:1;padding:0;width:26px;}
@@ -129,7 +129,7 @@ tbody tr.plan-row{cursor:default;}
 .plan-steps td.num{white-space:normal;}
 .field button{background:var(--surface);border:1px solid var(--border);border-radius:var(--rc);min-height:36px;padding:0 var(--c);}
 .field button[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:var(--surface);}
-/* v8: coverage as a stacked bar */
+/* v9: coverage as a stacked bar */
 .cov-bar{border-radius:6px;display:flex;height:18px;overflow:hidden;}
 .cov-seg{display:block;height:100%;}
 .cov-ranked{background:var(--accent);}
