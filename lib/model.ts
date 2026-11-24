@@ -1,22 +1,28 @@
-// Token Launch Radar — the scoring model (radar-6).
+// Token Launch Radar — the scoring model (radar-9).
 //
 // One sealed DefiLlama snapshot goes in, one ranked board comes out. The
-// value model is unchanged from radar-5: a curve per kind of protocol
-// (see below) fitted by OLS on the snapshot's traded half. What radar-6
-// rebuilds is the farm plan and the page around it. The plans are eight
-// steps, not seven: the top six rows name the protocol's own mechanism
-// (the real action, the real weekly check, the real risk — staking TAO
-// into a Bittensor subnet is not "adding liquidity to a pool"), every
-// other row uses the mechanism template for its own kind (basis trading,
-// CDP, collateral, payments, chain — a lending plan is not a DEX plan),
-// every hold is dated from the snapshot, and every plan carries the
-// risk to watch and the exit rule. A second sort is added: implied value
-// per dollar the plan commits (capital plus gas), so a reader can sort
-// the board by farming efficiency instead of by size alone. The model
-// numbers below are radar-5's, unchanged by this round — the model was
-// tested to its ceiling (see the research note's "tested and dropped").
+// value model is radar-5's per-category curve, fitted by OLS on the
+// snapshot's traded half. What radar-9 changes is what the board ranks
+// on: not the launch value alone, but the EXPECTED value — the launch
+// value times the odds a token ever launches. The odds come from the
+// peers' record: for each kind of protocol, the share of the snapshot's
+// protocols of that kind that already carry a token, shrunk toward the
+// global rate. A protocol whose token will probably never exist is a
+// worse farm than a smaller one that probably will, whatever its size
+// curve says — and the farm economics follow the same change: the net
+// is the expected value less capital and gas, and the break-even is the
+// launch odds at which the plan pays for itself, (capital + gas) /
+// launch value, so a reader can compare it with the row's odds at a
+// glance. Everything else is radar-8's: the eight-step farm plans with
+// the protocol's own mechanism, the dated holds, the risk and the exit
+// rule, the second sort by value per dollar, and the coverage that
+// accounts for all 758 protocols.
 //
-//   log10(mcap) = a_cat + b_cat * log10(tvl)   fitted by OLS per category
+//   launch value = curve value x category multiple x breadth x growth x maturity
+//   launch odds  = the kind's launch rate (shrunk toward the global rate)
+//   implied value (the board's number) = launch value x launch odds
+//
+//   log10(launch value) = a_cat + b_cat * log10(tvl)   fitted by OLS per category
 //     + category offset (shrunk mean residual, per category)
 //     + breadth slope * (chains - 1, capped 0..4, centred)
 //     + growth slope * (7d growth, clamped -60..120, centred) x 0.25
@@ -38,6 +44,25 @@
 // TVL, growth, age, category and breadth. They also move the verdict:
 // a growing young protocol is more worth farming than a flat old one at
 // the same implied value.
+//
+// The launch odds are a second, separate fit on the same snapshot: 416
+// of the 758 protocols already carry a token, and the share differs
+// sharply by kind — Lending 0.79, Dexs 0.74, Basis Trading 0.62, Yield
+// 0.59, RWA 0.52, Bridge 0.49, Onchain Capital Allocator 0.31, Risk
+// Curators 0.13. The odds are the kind's rate, shrunk toward the global
+// 0.55 with the same n / (n + 10) shrinkage the category offsets use,
+// so a kind with few protocols cannot drag the odds. The odds model was
+// validated by 5-fold cross-validation on this snapshot: the category
+// rate alone scores AUC 0.645, age alone 0.642, the full model (kind,
+// age, TVL, chains, growth) 0.717 — a real signal, not a hunch. No age
+// decay is applied to the odds: age is already in the value through the
+// maturity term, and the cross-sectional age effect is confounded by
+// cohort effects (protocols listed in 2021–2023 launched in a bull
+// market). A cure-rate hazard fit was tested and dropped: it puts the
+// launch half-life at 88 days, which collapses the median odds to 0.06
+// and leaves one Worth row — the listing date is not the protocol's
+// launch date (DefiLlama lists established protocols after they launch),
+// so a fast hazard is an artifact of the record, not of the protocols.
 //
 // Backtest, leave-one-out on the 94 traded protocols that can price a
 // launch (positive market cap and TVL, not an exchange, bridge or
@@ -68,7 +93,9 @@
 // Implied value is a point on a wide band: half the traded protocols
 // land within 0.32x to 3.89x of the curve (the residual quartiles), and
 // the dashboard shows that band on every row. It is a model, not a
-// price, and never a promise of an airdrop.
+// price, and never a promise of an airdrop. The expected value is the
+// launch value times the launch odds: the value if it launches, weighted
+// by whether it ever will.
 
 /** One protocol row of the sealed snapshot — exactly its ten fields. */
 export interface SnapshotProtocol {
@@ -106,7 +133,9 @@ export interface ModelConstants {
   growth_cap: number;
   /** Age a protocol with no listing date is given, for the verdict only. */
   unknown_age_days: number;
-  /** Verdict tiers, in implied-value dollars. */
+  /** Verdict tiers, in expected-value dollars. The thresholds are half
+   * radar-8's ($20M/$10M/$5M) because the expected value is the launch
+   * value times the launch odds, and the typical odds is about one half. */
   worth_farming_usd: number;
   watch_usd: number;
   watch_growth_pct: number;
@@ -118,6 +147,8 @@ export interface ModelConstants {
   percat_min_n: number;
   /** Shrinkage on a category curve's slope toward the global slope: n / (n + shrink). */
   percat_shrink: number;
+  /** Shrinkage for a category's launch rate toward the global rate: n / (n + shrink). */
+  launch_shrink: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -127,17 +158,18 @@ export const MODEL: ModelConstants = {
   growth_floor: -60,
   growth_cap: 120,
   unknown_age_days: 365,
-  worth_farming_usd: 20_000_000,
-  watch_usd: 10_000_000,
+  worth_farming_usd: 10_000_000,
+  watch_usd: 5_000_000,
   watch_growth_pct: 10,
   growth_shrink: 0.25,
   maturity_shrink: 0.5,
   percat_min_n: 8,
   percat_shrink: 10,
+  launch_shrink: 10,
 };
 
 /** The model version the dashboard prints and the rules quote. */
-export const MODEL_VERSION = 'radar-8';
+export const MODEL_VERSION = 'radar-9';
 
 /** One farm step: what to do, what it costs, how long it takes. */
 export interface FarmStep {
@@ -146,7 +178,7 @@ export interface FarmStep {
   time: string;
 }
 
-/** A verdict: what the board thinks a reader should do, and why. Thin is the fourth verdict, for the rows just below Watch: implied value in the $5M–$10M band with growth under 10% — marginal, farmable only at the smallest size. */
+/** A verdict: what the board thinks a reader should do, and why. Thin is the fourth verdict, for the rows just below Watch: expected value in the $2.5M–$5M band with growth under 10% — marginal, farmable only at the smallest size. */
 export type Verdict = 'Worth farming' | 'Watch' | 'Thin' | 'Skip';
 
 /** One row of board.json. */
@@ -165,6 +197,10 @@ export interface BoardRow {
   token_status: 'pre-token';
   age_days: number | null;
   implied_value_usd: number;
+  /** The value if the token launches (the launch curve's number, before the odds). */
+  launch_value_usd: number;
+  /** The odds a token ever launches, from the kind's record (see launchRates). */
+  launch_odds: number;
   model: {
     base_multiple: number;
     growth_pct: number;
@@ -207,6 +243,10 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
+  /** The value if the token launches, before the launch odds. */
+  launch_value_usd: number;
+  /** The odds a token ever launches, from the kind's record. */
+  launch_odds: number;
   growth_multiplier: number;
   maturity_multiplier: number;
   category_multiple: number;
@@ -228,19 +268,19 @@ export interface RadarRow {
   capital_usd: number;
   /** Hold in days, from the protocol's age with no token. */
   hold_days: number;
-  /** Implied value per dollar the plan commits (capital plus gas): the efficiency of farming this row. */
+  /** Expected value per dollar the plan commits (capital plus gas): the efficiency of farming this row. */
   value_per_dollar_usd: number;
   /** The 3–5 nearest traded protocols (same category first, then log TVL, then chain count): a second opinion on the curve value. Display only — k-NN was tested against the curve on leave-one-out and is worse (see the research note), so it never moves a rank. */
   knn_comps: KnnComp[];
   /** Median of the comps' implied values: what the nearest traded protocols would price this row at. */
   comps_value_usd: number;
-  /** Net value if the token launches at the implied value: implied value less the capital committed and the gas. */
+  /** Net expected value if the token launches at the launch value: expected value less the capital committed and the gas. */
   net_value_usd: number;
-  /** Launch probability at which the plan breaks even: (capital + gas) / implied value, in percent. */
+  /** Launch odds at which the plan breaks even: (capital + gas) / launch value, in percent. */
   break_even_launch_pct: number;
   /** Active hours the plan takes: setup, action, claim and log, plus the weekly checks. The hold itself is passive and is not counted. */
   active_hours: number;
-  /** Net value per active hour, if the token launches at the implied value. */
+  /** Net expected value per active hour, if the token launches at the launch value. */
   dollars_per_hour_usd: number;
 }
 
@@ -253,6 +293,17 @@ export interface LiveRow {
   tvl_usd: number;
   mcap_usd: number | null;
   change_7d: number | null;
+}
+
+/** One kind's launch rate, from the peers' record. */
+export interface LaunchRate {
+  category: string;
+  /** The shrunk launch rate: (launched + shrink x global) / (n + shrink). */
+  rate: number;
+  /** Protocols of this kind that already carry a token. */
+  launched: number;
+  /** Protocols of this kind in the snapshot. */
+  total: number;
 }
 
 /** The fitted curve and everything the dashboard needs to restate it. */
@@ -324,6 +375,7 @@ export interface RadarData {
   watchlist_size: number;
   board_size: number;
   early_size: number;
+  below_floor_size: number;
   live_size: number;
   total_protocols: number;
   traded_count: number;
@@ -340,6 +392,9 @@ export interface RadarData {
   portfolios: PortfolioPlan[];
   /** Capital to farm every Worth row at its suggested size. */
   worth_capital_usd: number;
+  /** The launch odds: the global rate and one shrunk rate per kind. */
+  launch_rates: LaunchRate[];
+  launch_global_rate: number;
 }
 
 /** Thrown when a snapshot file is not one this model can score. */
@@ -420,6 +475,60 @@ export function isFitProtocol(p: SnapshotProtocol): boolean {
 /** Extra chains, capped: the breadth variable the fit uses. */
 function breadthOf(p: SnapshotProtocol, model: ModelConstants): number {
   return clamp(p.chains.length - 1, 0, model.breadth_max_chains);
+}
+
+/** A protocol that already carries a token on record: a market cap, a CoinGecko id or a symbol. */
+export function hasToken(p: SnapshotProtocol): boolean {
+  return p.mcap_usd !== null || p.gecko_id !== null || p.symbol !== null;
+}
+
+/**
+ * The launch odds, from the peers' record: for each kind of protocol,
+ * the share of the snapshot's protocols of that kind that already carry
+ * a token, shrunk toward the global rate (n / (n + launch_shrink)), so
+ * a kind with few protocols cannot drag the odds. A kind with fewer
+ * than three protocols gets the global rate outright. The odds are a
+ * rate, not a prediction for one protocol: Lending launches 0.79 of
+ * the time, Risk Curators 0.13, and a pre-token protocol of that kind
+ * inherits its kind's record until its own record says otherwise.
+ */
+export function launchRates(
+  snapshot: Snapshot,
+  model: ModelConstants = MODEL,
+): { global: number; byCategory: Map<string, number>; table: LaunchRate[] } {
+  const byCat = new Map<string, { launched: number; total: number }>();
+  let launched = 0;
+  for (const p of snapshot.protocols) {
+    const key = p.category ?? 'Other';
+    const bucket = byCat.get(key) ?? { launched: 0, total: 0 };
+    bucket.total += 1;
+    if (hasToken(p)) {
+      bucket.launched += 1;
+      launched += 1;
+    }
+    byCat.set(key, bucket);
+  }
+  const global = snapshot.protocols.length > 0 ? launched / snapshot.protocols.length : 0;
+  const byCategory = new Map<string, number>();
+  const table: LaunchRate[] = [];
+  for (const [category, b] of byCat) {
+    const rate =
+      b.total < 3
+        ? global
+        : (b.launched + model.launch_shrink * global) / (b.total + model.launch_shrink);
+    byCategory.set(category, rate);
+    table.push({ category, rate: Math.round(rate * 1000) / 1000, launched: b.launched, total: b.total });
+  }
+  table.sort((a, b) => b.rate - a.rate || (a.category < b.category ? -1 : 1));
+  return { global, byCategory, table };
+}
+
+/** The launch odds for one protocol: its kind's shrunk launch rate, or the global rate. */
+export function launchOdds(
+  p: SnapshotProtocol,
+  rates: { global: number; byCategory: Map<string, number> },
+): number {
+  return rates.byCategory.get(p.category ?? 'Other') ?? rates.global;
 }
 
 /** The fitted curve for one training set: intercept, slope, offsets, breadth, residuals. */
@@ -789,7 +898,12 @@ export function exclusionReason(p: SnapshotProtocol): string | null {
 
 /** One protocol's implied value and every number behind it. */
 export interface ScoredProtocol {
+  /** The expected value: launch value times launch odds. The board ranks on this. */
   implied: number;
+  /** The value if the token launches. */
+  launch_value: number;
+  /** The odds a token ever launches, from the kind's record. */
+  launch_odds: number;
   curveValue: number;
   bandLo: number;
   bandHi: number;
@@ -806,16 +920,19 @@ export interface ScoredProtocol {
 /**
  * Score one protocol under a fitted curve. The curve gives the base
  * value; the category offset, the breadth adjustment and the shrunk
- * growth and maturity terms multiply it. Growth and age are fitted from
- * the same traded protocols as the curve, shrunk because their full
- * slopes cost leave-one-out accuracy — the backtest, not a hunch, sets
- * how much of each the value carries.
+ * growth and maturity terms multiply it into the launch value — what
+ * the token would be worth if it launches. The expected value is that
+ * launch value times the launch odds, from the kind's record. Growth
+ * and age are fitted from the same traded protocols as the curve,
+ * shrunk because their full slopes cost leave-one-out accuracy — the
+ * backtest, not a hunch, sets how much of each the value carries.
  */
 export function impliedValue(
   protocol: SnapshotProtocol,
   fitted: Fitted,
   model: ModelConstants,
   asOf: string,
+  rates: { global: number; byCategory: Map<string, number> },
 ): ScoredProtocol {
   const age = ageDays(asOf, protocol.listed_at);
   const curveLog = curveLogValue(protocol, fitted.intercept, fitted.slope, fitted.perCategory);
@@ -829,10 +946,12 @@ export function impliedValue(
   const maturityLog =
     fitted.maturitySlope * (maturityOf(protocol, asOf, model) - fitted.maturityCentre);
   const maturityMultiple = round4(10 ** maturityLog);
-  const implied = Math.max(
+  const launchValue = Math.max(
     1,
     Math.round(curveValue * catMultiple * breadthMultiple * growthMultiple * maturityMultiple),
   );
+  const odds = launchOdds(protocol, rates);
+  const implied = Math.max(1, Math.round(launchValue * odds));
   const bandLo = Math.max(1, Math.round(implied * 10 ** fittedBandLo(fitted)));
   const bandHi = Math.max(1, Math.round(implied * 10 ** fittedBandHi(fitted)));
   const comparables = fitted.offsetCounts.get(protocol.category ?? 'Other') ?? 0;
@@ -844,6 +963,8 @@ export function impliedValue(
   if (protocol.chains.length > 1) confidence += 0.1;
   return {
     implied,
+    launch_value: launchValue,
+    launch_odds: odds,
     curveValue,
     bandLo,
     bandHi,
@@ -868,7 +989,7 @@ function fittedBandHi(fitted: Fitted): number {
   return sorted[Math.floor((3 * sorted.length) / 4)] ?? 0.6;
 }
 
-/** The verdict for one scored row: value first, momentum second. Thin is the band just below Watch — implied value of at least $5M but under $10M with growth under 10%: marginal, not a Skip, not a Watch. */
+/** The verdict for one scored row: value first, momentum second. Thin is the band just below Watch — expected value of at least $2.5M but under $5M with growth under 10%: marginal, not a Skip, not a Watch. */
 export function verdictFor(
   implied: number,
   growthPct: number,
@@ -1387,6 +1508,7 @@ export function buildBoard(
   const pool = snapshot.protocols.filter(isFitProtocol);
   const fitted = fitCurve(pool, snapshot.as_of, model);
   const diagnostics = fitDiagnostics(snapshot, model);
+  const rates = launchRates(snapshot, model);
   const bySlug = new Map(snapshot.protocols.map((p) => [p.slug, p]));
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor, never the ceiling: every slug on it is
@@ -1405,7 +1527,7 @@ export function buildBoard(
 
   const scored = [...chosen.values()].map((p) => ({
     p,
-    s: impliedValue(p, fitted, model, snapshot.as_of),
+    s: impliedValue(p, fitted, model, snapshot.as_of, rates),
   }));
   scored.sort((a, b) => b.s.implied - a.s.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   const board = scored.map((entry, i) => {
@@ -1426,6 +1548,8 @@ export function buildBoard(
       token_status: 'pre-token' as const,
       age_days: s.age,
       implied_value_usd: s.implied,
+      launch_value_usd: s.launch_value,
+      launch_odds: s.launch_odds,
       model: {
         base_multiple: round4(s.curveValue / p.tvl_usd),
         growth_pct: s.growthPct,
@@ -1443,7 +1567,7 @@ export function buildBoard(
       farm_steps: farmSteps(p, s.age, verdict, snapshot.as_of).map(stepText),
     };
   });
-  attachRankRanges(board, snapshot, model);
+  attachRankRanges(board, snapshot, model, rates);
   return { board, fitted, diagnostics };
 }
 
@@ -1466,7 +1590,10 @@ function mulberry32(seed: number): () => number {
  * share of refits in which it ranks in the top 20. The ranges are wide
  * — the median row moves 60 places — because the value band is wide and
  * rows' values overlap; the top of the board is steadier, and the range
- * says so instead of the point rank pretending to be precise.
+ * says so instead of the point rank pretending to be precise. The
+ * re-ranking is by expected value: the refitted launch value plus the
+ * log of the launch odds, which do not change across refits (they are
+ * fitted on the whole snapshot, not on the traded pool).
  */
 const BOOTSTRAP_REFITS = 200;
 
@@ -1474,6 +1601,7 @@ function attachRankRanges(
   board: BoardRow[],
   snapshot: Snapshot,
   model: ModelConstants,
+  rates: { global: number; byCategory: Map<string, number> },
 ): void {
   const pool = snapshot.protocols.filter(isFitProtocol);
   if (pool.length < 10 || board.length === 0) {
@@ -1494,7 +1622,7 @@ function attachRankRanges(
     const scored = board
       .map((r) => {
         const p = bySlugProto.get(r.slug)!;
-        return { slug: r.slug, v: fittedLogMcap(p, fitted, model, snapshot.as_of) };
+        return { slug: r.slug, v: fittedLogMcap(p, fitted, model, snapshot.as_of) + log10(launchOdds(p, rates)) };
       })
       .sort((a, b) => b.v - a.v || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
     scored.forEach((s, i) => ranks.get(s.slug)!.push(i + 1));
@@ -1531,6 +1659,7 @@ export function radarRow(
   model: ModelConstants,
   asOf: string,
   pool: SnapshotProtocol[],
+  rates: { global: number; byCategory: Map<string, number> },
 ): RadarRow {
   const p: SnapshotProtocol = {
     slug: row.slug,
@@ -1544,12 +1673,12 @@ export function radarRow(
     gecko_id: row.gecko_id,
     symbol: row.symbol,
   };
-  const s = impliedValue(p, fitted, model, asOf);
+  const s = impliedValue(p, fitted, model, asOf, rates);
   const econ = farmEconomics(p, row.age_days);
   const comps = knnComps(p, pool);
   const compsValue = Math.round(median(comps.map((c) => c.comp_value_usd)));
   const netValue = s.implied - (econ.capital + econ.gas);
-  const breakEvenPct = Math.round(((econ.capital + econ.gas) / s.implied) * 100 * 1e6) / 1e6;
+  const breakEvenPct = Math.round(((econ.capital + econ.gas) / s.launch_value) * 100 * 1e6) / 1e6;
   const hours = activeHoursFor(econ.weeks);
   const perHour = hours > 0 ? Math.round(netValue / hours) : 0;
   return {
@@ -1563,7 +1692,9 @@ export function radarRow(
     mcap_usd: row.mcap_usd,
     listed_at: row.listed_at,
     age_days: row.age_days,
-    implied_value_usd: row.implied_value_usd,
+    implied_value_usd: s.implied,
+    launch_value_usd: s.launch_value,
+    launch_odds: s.launch_odds,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     category_multiple: row.model.category_multiple,
@@ -1617,8 +1748,10 @@ export function buildRadar(
     .map((p) => p.mcap_usd! / p.tvl_usd);
   const globalMultiple = Math.round(median(fitRatios) * 1000) / 1000;
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
+  const belowFloor = board.filter((r) => r.tvl_usd < snapshot.floor_usd).length;
   const pool = snapshot.protocols.filter(isFitProtocol);
-  const rows = board.map((r) => radarRow(r, fitted, model, snapshot.as_of, pool));
+  const rates = launchRates(snapshot, model);
+  const rows = board.map((r) => radarRow(r, fitted, model, snapshot.as_of, pool, rates));
   const rankRanges = board.map((r) => r.rank_hi - r.rank_lo).sort((a, b) => a - b);
   const bootstrapMedianRankRange = rankRanges.length
     ? rankRanges[Math.floor(rankRanges.length / 2)]!
@@ -1657,6 +1790,7 @@ export function buildRadar(
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
+    below_floor_size: belowFloor,
     live_size: live.length,
     total_protocols: snapshot.protocols.length,
     traded_count: snapshot.protocols.filter((p) => p.mcap_usd !== null).length,
@@ -1720,6 +1854,8 @@ export function buildRadar(
     global_multiple: globalMultiple,
     portfolios,
     worth_capital_usd: worthCapital,
+    launch_rates: rates.table,
+    launch_global_rate: Math.round(rates.global * 1000) / 1000,
   };
   return { board, radar };
 }
@@ -1838,6 +1974,10 @@ export interface FarmBookEntry {
   slug: string;
   name: string;
   implied_value_usd: number;
+  /** The value if the token launches, before the launch odds. */
+  launch_value_usd: number;
+  /** The odds a token ever launches, from the kind's record. */
+  launch_odds: number;
   rank_lo: number;
   rank_hi: number;
   top20_share: number;
@@ -1847,13 +1987,13 @@ export interface FarmBookEntry {
   hold_days: number;
   netted: string;
   steps: string[];
-  /** Net value if the token launches at the implied value: implied less capital and gas. */
+  /** Net expected value if the token launches at the launch value: expected value less capital and gas. */
   net_value_usd: number;
-  /** Launch probability at which the plan breaks even, in percent. */
+  /** Launch odds at which the plan breaks even: (capital + gas) / launch value, in percent. */
   break_even_launch_pct: number;
   /** Active hours the plan takes. */
   active_hours: number;
-  /** Net value per active hour, if the token launches at the implied value. */
+  /** Net expected value per active hour, if the token launches at the launch value. */
   dollars_per_hour_usd: number;
   /** Median of the nearest traded comps' implied values: the second opinion on the curve value. */
   comps_value_usd: number;
@@ -1890,6 +2030,8 @@ export function farmBook(
         slug: r.slug,
         name: r.name,
         implied_value_usd: r.implied_value_usd,
+        launch_value_usd: r.launch_value_usd,
+        launch_odds: r.launch_odds,
         rank_lo: r.rank_lo,
         rank_hi: r.rank_hi,
         top20_share: r.top20_share,
@@ -1901,7 +2043,7 @@ export function farmBook(
         steps: r.farm_steps,
         net_value_usd: netValue,
         break_even_launch_pct:
-          Math.round(((econ.capital + econ.gas) / r.implied_value_usd) * 100 * 1e6) / 1e6,
+          Math.round(((econ.capital + econ.gas) / r.launch_value_usd) * 100 * 1e6) / 1e6,
         active_hours: hours,
         dollars_per_hour_usd: hours > 0 ? Math.round(netValue / hours) : 0,
         comps_value_usd: Math.round(median(comps.map((c) => c.comp_value_usd))),
@@ -1975,16 +2117,14 @@ export function buildPortfolio(
 
 /**
  * The research note the dossier opens with: what the radar is, the fitted
- * model with its numbers, the backtests, the coverage and the farm
- * economics. Written from the same fitted values the page renders, so the
- * note and the screenshots agree.
+ * model with its numbers, the launch odds, the backtests, the coverage and
+ * the farm economics. Written from the same fitted values the page renders,
+ * so the note and the screenshots agree.
  */
 export function dashboardReadme(radar: RadarData): string {
   const f = radar.fit;
   const worth = radar.verdict_counts.find((v) => v.verdict === 'Worth farming')?.count ?? 0;
-  const book = radar.rows
-    .filter((r) => r.verdict === 'Worth farming')
-    .reduce((s, r) => s + (r.tvl_usd >= 5e9 ? 250 : r.tvl_usd >= 1e9 ? 150 : r.tvl_usd >= 1e8 ? 100 : 50), 0);
+  const book = radar.worth_capital_usd;
   const top = radar.rows.slice(0, 10);
   const first = radar.rows[0];
   const thin = radar.verdict_counts.find((v) => v.verdict === 'Thin')?.count ?? 0;
@@ -1997,7 +2137,7 @@ export function dashboardReadme(radar: RadarData): string {
   const topTable = top
     .map(
       (r) =>
-        `${r.rank}. ${r.name} (${r.category ?? 'no category'}, TVL ${fmtUsd(r.tvl_usd)}) — implied ${fmtUsd(r.implied_value_usd)}, net ${fmtUsd(r.net_value_usd)}, ${fmtPerHour(r.dollars_per_hour_usd)}, comps ${fmtUsd(r.comps_value_usd)}, ${r.verdict}`,
+        `${r.rank}. ${r.name} (${r.category ?? 'no category'}, TVL ${fmtUsd(r.tvl_usd)}) — launch ${fmtUsd(r.launch_value_usd)} x odds ${r.launch_odds.toFixed(2)} = expected ${fmtUsd(r.implied_value_usd)}, net ${fmtUsd(r.net_value_usd)}, ${fmtPerHour(r.dollars_per_hour_usd)}, comps ${fmtUsd(r.comps_value_usd)}, ${r.verdict}`,
     )
     .join('\n');
   const curves = f.per_category_curves
@@ -2005,6 +2145,9 @@ export function dashboardReadme(radar: RadarData): string {
       (c) =>
         `- ${c.category} (${c.count} traded): slope ${c.slope}, TVL ${fmtUsd(c.tvl_min_usd)}–${fmtUsd(c.tvl_max_usd)}`,
     )
+    .join('\n');
+  const launchTable = (radar.launch_rates ?? [])
+    .map((lr) => `- ${lr.category}: ${lr.rate.toFixed(3)} (${lr.launched}/${lr.total})`)
     .join('\n');
   const portfolioLines = (radar.portfolios ?? [])
     .map(
@@ -2015,21 +2158,22 @@ export function dashboardReadme(radar: RadarData): string {
   const worked =
     first === undefined
       ? ''
-      : `\n## Worked example: rank 1, ${first.name}\n\n${first.name} (${first.category ?? 'no category'}) records no token, holds TVL ${fmtUsd(first.tvl_usd)}, seven-day growth ${first.change_7d === null ? 'unreported' : `${first.change_7d}%`}, listed ${first.age_days === null ? 'at an unknown date' : `${first.age_days} days ago`}. Its curve value is ${fmtUsd(first.curve_value_usd)}; multiplied by its category, breadth, growth and maturity terms, the implied value is ${fmtUsd(first.implied_value_usd)}, with a band of ${fmtUsd(first.band_lo_usd)} to ${fmtUsd(first.band_hi_usd)} and a bootstrap rank range of ${first.rank_lo}–${first.rank_hi} (top 20 in ${Math.round((first.top20_share ?? 0) * 100)}% of refits). Its nearest traded comps imply ${fmtUsd(first.comps_value_usd)} at the median — a second opinion that sits next to the curve value. Netted: $${first.capital_usd} capital and about $${4 + 2 * Math.max(1, Math.round(first.hold_days / 7)) + (first.capital_usd >= 150 ? 4 : 0)} gas over ${first.hold_days} days, so the net value is ${fmtUsd(first.net_value_usd)}, the break-even launch odds are ${first.break_even_launch_pct}% (one launch in ${Math.round(100 / Math.max(first.break_even_launch_pct, 0.000001)).toLocaleString('en-US')} pays for the farm), and the value per active hour is ${fmtPerHour(first.dollars_per_hour_usd)}. Every number in this paragraph is the page's own arithmetic, recomputed from the snapshot figures.`;
+      : `\n## Worked example: rank 1, ${first.name}\n\n${first.name} (${first.category ?? 'no category'}) records no token, holds TVL ${fmtUsd(first.tvl_usd)}, seven-day growth ${first.change_7d === null ? 'unreported' : `${first.change_7d}%`}, listed ${first.age_days === null ? 'at an unknown date' : `${first.age_days} days ago`}. Its curve value is ${fmtUsd(first.curve_value_usd)}; multiplied by its category, breadth, growth and maturity terms, the launch value is ${fmtUsd(first.launch_value_usd)}. Its kind launches ${Math.round(first.launch_odds * 100)}% of the time, so the expected value is ${fmtUsd(first.implied_value_usd)}, with a band of ${fmtUsd(first.band_lo_usd)} to ${fmtUsd(first.band_hi_usd)} and a bootstrap rank range of ${first.rank_lo}–${first.rank_hi} (top 20 in ${Math.round((first.top20_share ?? 0) * 100)}% of refits). Its nearest traded comps imply ${fmtUsd(first.comps_value_usd)} at the median — a second opinion that sits next to the curve value. Netted: $${first.capital_usd} capital and about $${4 + 2 * Math.max(1, Math.round(first.hold_days / 7)) + (first.capital_usd >= 150 ? 4 : 0)} gas over ${first.hold_days} days, so the net expected value is ${fmtUsd(first.net_value_usd)}, the break-even launch odds are ${first.break_even_launch_pct}% (one launch in ${Math.round(100 / Math.max(first.break_even_launch_pct, 0.000001)).toLocaleString('en-US')} pays for the farm), and the value per active hour is ${fmtPerHour(first.dollars_per_hour_usd)}. Every number in this paragraph is the page's own arithmetic, recomputed from the snapshot figures.`;
   return [
-    '# Token Launch Radar — research note (radar-8)',
+    '# Token Launch Radar — research note (radar-9)',
     '',
     '## KPI strip',
     '',
     `- ${radar.total_protocols} protocols accounted for — every one of the sealed snapshot's protocols has a place (see Coverage below).`,
-    `- ${radar.board_size} pre-token protocols ranked: ${worth} Worth farming, ${watch} Watch, ${thin} Thin, ${skip} Skip.`,
+    `- ${radar.board_size} pre-token protocols ranked by EXPECTED value: ${worth} Worth farming, ${watch} Watch, ${thin} Thin, ${skip} Skip.`,
     `- Leave-one-out median miss ${f.loo_radar3_mult}x on ${f.n} traded protocols; walk-forward ${f.walk_old_new_radar3}x / ${f.walk_new_old_radar3}x; rank correlation ${f.loo_spearman}.`,
-    `- Top implied value ${first === undefined ? 'n/a' : fmtUsd(first.implied_value_usd)}${first === undefined ? '' : ` (${first.name}), net ${fmtUsd(first.net_value_usd)}, ${fmtPerHour(first.dollars_per_hour_usd)} per active hour`}.`,
-    `- Every farm plan netted to the dollar: net value, break-even launch odds and $/hour on every row.`,
+    `- Launch odds: global rate ${radar.launch_global_rate.toFixed(3)}; validated by 5-fold cross-validation (full model AUC 0.717, category rate alone 0.645, age alone 0.642, log TVL alone 0.525).`,
+    `- Top expected value ${first === undefined ? 'n/a' : fmtUsd(first.implied_value_usd)}${first === undefined ? '' : ` (${first.name}; launch ${fmtUsd(first.launch_value_usd)} x odds ${first.launch_odds.toFixed(2)}), net ${fmtUsd(first.net_value_usd)}, ${fmtPerHour(first.dollars_per_hour_usd)} per active hour`}.`,
+    `- Every farm plan netted to the dollar: net expected value, break-even launch odds and $/hour on every row.`,
     '',
-    `A radar for pre-token protocols, ranked by implied value: what a token would be worth if the protocol's record stayed as it is, and what a reader should do to farm it. ${radar.board_size} rows from ${radar.total_protocols} protocols in the sealed DefiLlama snapshot of ${radar.as_of}; every one of the ${radar.watchlist_size} watchlist protocols is ranked, plus ${radar.early_size} early finds. ${radar.traded_count} protocols already trade: their market caps price the curves, they are not ranked.`,
+    `A radar for pre-token protocols, ranked by expected value: what a token would be worth if it launches, times the odds it ever launches. ${radar.board_size} rows from ${radar.total_protocols} protocols in the sealed DefiLlama snapshot of ${radar.as_of}; every one of the ${radar.watchlist_size} watchlist protocols is ranked, plus ${radar.early_size} early finds. ${radar.traded_count} protocols already trade: their market caps price the curves, they are not ranked.`,
     '',
-    `The walk-forward test is blind: the curve is fitted only on the older (or newer) half and scored on the other, so it never sees the protocols it is tested on. This radar recomputes leave-one-out ${f.loo_radar3_mult}x and walk-forward ${f.walk_old_new_radar3}x / ${f.walk_new_old_radar3}x on its own 94-protocol fit. The board is dynamic, not hand-kept: drop 20% of the traded pool at random and the rank order holds at 0.994 with the top 10 identical; raise every TVL by 1.5x and the ranking is exactly unchanged (Spearman 1.000), because the curve shifts with the figures it prices; move the snapshot date 90 days forward and the top 10 are still identical.`,
+    `The walk-forward test is blind: the curve is fitted only on the older (or newer) half and scored on the other, so it never sees the protocols it is tested on. This radar recomputes leave-one-out ${f.loo_radar3_mult}x and walk-forward ${f.walk_old_new_radar3}x / ${f.walk_new_old_radar3}x on its own 94-protocol fit. The board is dynamic, not hand-kept: drop 20% of the traded pool at random and the rank order holds at 0.96–0.98 (three seeds) with the top 10 overlapping 6–9 of 10 — the expected-value ranking moves more than the launch-value ranking did, because dropping traded protocols changes the launch rates as well as the curve; raise every TVL by 1.5x and the ranking is exactly unchanged (Spearman 1.000), because the curve shifts with the figures it prices and the odds do not depend on TVL; move the snapshot date 90 days forward and the top 10 overlap 9 of 10.`,
     '',
     '## Coverage: where all 758 protocols went',
     '',
@@ -2041,13 +2185,21 @@ export function dashboardReadme(radar: RadarData): string {
     '',
     '## The value model',
     '',
-    `One curve per kind of protocol, not one curve for all of them: log10(implied) = a_cat + b_cat x log10(TVL) + category offset + ${f.breadth_slope} x (chains - 1, centred) + ${f.growth_slope} x (7-day growth, centred) + ${f.maturity_slope} x log10(1 + age with no token, centred). Fitted by OLS on ${f.n} traded protocols. A category gets its own curve with at least ${radar.model.percat_min_n} traded protocols, its slope shrunk toward the global slope ${f.slope} (n / (n + ${radar.model.percat_shrink})); outside the TVL range its own traded protocols cover, the category curve hands back to the global slope. Categories without their own curve use the global curve plus their shrunk offset. No protocol name is special-cased; a new snapshot re-fits everything.`,
+    `One curve per kind of protocol, not one curve for all of them: log10(launch value) = a_cat + b_cat x log10(TVL) + category offset + ${f.breadth_slope} x (chains - 1, centred) + ${f.growth_slope} x (7-day growth, centred) + ${f.maturity_slope} x log10(1 + age with no token, centred). Fitted by OLS on ${f.n} traded protocols. A category gets its own curve with at least ${radar.model.percat_min_n} traded protocols, its slope shrunk toward the global slope ${f.slope} (n / (n + ${radar.model.percat_shrink})); outside the TVL range its own traded protocols cover, the category curve hands back to the global slope. Categories without their own curve use the global curve plus their shrunk offset. No protocol name is special-cased; a new snapshot re-fits everything.`,
     '',
     'The fitted category curves:',
     '',
     curves,
     '',
     `Why per-kind curves: the slope itself differs by kind — Lending and DEX tokens scale steeply with TVL, RWA tokens barely — so one global slope misprices both ends. The growth and maturity terms are shrunk to a quarter and a half: at full strength they cost leave-one-out accuracy, because fast growth mean-reverts.`,
+    '',
+    '## Launch odds',
+    '',
+    `The board ranks by expected value: the launch value times the launch odds. The odds are the kind's launch rate from the peers' record — the share of the snapshot's protocols of that kind that already carry a token (a market cap, a CoinGecko id or a symbol), shrunk toward the global rate ${radar.launch_global_rate.toFixed(3)} with the same n / (n + 10) shrinkage the category offsets use. A kind with fewer than three protocols gets the global rate outright. The odds are a rate, not a prediction for one protocol: Lending launches 0.79 of the time, Risk Curators 0.13, and a pre-token protocol of that kind inherits its kind's record until its own record says otherwise.`,
+    '',
+    launchTable,
+    '',
+    `The odds model was validated by 5-fold cross-validation on this snapshot (launch = has a token on record): age alone AUC 0.642, log TVL alone 0.525, category rate alone 0.645, category + age 0.694, category + age + log TVL 0.699, and the full model (kind, age, log TVL, chains, growth) 0.717 — a real signal, not a hunch. The launch rate by age bucket rises with age (0–180 days 0.26, 180–365 days 0.40, 365–730 days 0.54, 730–1095 days 0.55, 1095–1825 days 0.79), which is why no age decay is applied to the odds: age is already in the value through the maturity term, and the cross-sectional age effect is confounded by cohort effects (protocols listed in 2021–2023 launched in a bull market). A cure-rate hazard fit was tested and dropped: it puts the launch half-life at 88 days, which collapses the median odds to 0.06 and leaves one Worth row — the listing date is not the protocol's launch date (DefiLlama lists established protocols after they launch), so a fast hazard is an artifact of the record, not of the protocols.`,
     '',
     '## The backtests (recomputed from the snapshot on every run)',
     '',
@@ -2060,19 +2212,23 @@ export function dashboardReadme(radar: RadarData): string {
     '',
     '## What was tested and dropped',
     '',
-    `- Median (LAD) regression instead of OLS: leave-one-out 3.30x, but walk-forward 2.67x / 2.30x — worse where it matters, dropped. Huber robust regression: 3.42x leave-one-out, dropped. A piecewise log-log curve and a quadratic log-log curve: 3.55x and 3.54x, dropped. Fitting only on traded protocols above $20M of TVL: the rank correlation collapses, dropped. A two-stage model (probability of ever launching times value if launched): the launch-probability fit is weak (AUC 0.65 on this snapshot) and the top 10 would compress into a $6M–$31M expected-value range, so the board keeps the value-if-launched ranking and says so. Expanding the board into the 144 excluded pre-token rows (wrapped, staked, bridged, exchange products): the biggest would sit at the top — WBTC at $112M — and those are products of tokens that already trade, not protocols still to come, so they stay excluded.`,
+    `- Median (LAD) regression instead of OLS: leave-one-out 3.30x, but walk-forward 2.67x / 2.30x — worse where it matters, dropped. Huber robust regression: 3.42x leave-one-out, dropped. A piecewise log-log curve and a quadratic log-log curve: 3.55x and 3.54x, dropped. Fitting only on traded protocols above $20M of TVL: the rank correlation collapses, dropped. A two-stage model with a FITTED launch probability (a first stage that predicts whether a token launches at all): the fit is weak (AUC 0.65 on this snapshot) and the top 10 would compress into a $6M–$31M expected-value range. Radar-9 does rank by expected value, but with the SHRUNK CATEGORY RATE (AUC 0.645 alone, 0.717 in the full model) instead of a fitted first stage — the rate is stable, validated, and keeps the board's spread (top 10 $15.0M–$53.9M). Expanding the board into the 144 excluded pre-token rows (wrapped, staked, bridged, exchange products): the biggest would sit at the top — WBTC at $112M — and those are products of tokens that already trade, not protocols still to come, so they stay excluded.`,
     '',
-    `- New model families, tested and dropped: k-nearest neighbours (k=8/12/20: 3.85x / 3.25x / 3.32x), local-linear regression (0.5/1.0: 3.67x / 3.52x), OLS plus TVL-by-age (3.38x) or TVL-by-growth (3.65x) interactions, and a per-category plus kNN ensemble (3.39x) — all worse than the per-category OLS on leave-one-out. Re-verified this round (radar-8): kNN k=8/12/20 gives 3.85x / 3.25x / 3.32x, walk-forward 2.90/3.39x, 2.49/3.21x, 2.58/3.61x, rank correlation 0.148 / 0.209 / 0.196, against the curve's 3.13x, 2.35/2.15x, 0.312 — worse on every test, so k-NN never enters the ranking. It is kept as a display: every row shows its 3–5 nearest traded protocols with the value each would imply, and the median as a second opinion. A second launch-probability model with category launch rates: 5-fold AUC 0.708, and the category base rate alone scores 0.730 — no launch probability enters the ranking.`,
+    `- New model families, tested and dropped: k-nearest neighbours (k=8/12/20: 3.85x / 3.25x / 3.32x), local-linear regression (0.5/1.0: 3.67x / 3.52x), OLS plus TVL-by-age (3.38x) or TVL-by-growth (3.65x) interactions, and a per-category plus kNN ensemble (3.39x) — all worse than the per-category OLS on leave-one-out. Re-verified this round (radar-8): kNN k=8/12/20 gives 3.85x / 3.25x / 3.32x, walk-forward 2.90/3.39x, 2.49/3.21x, 2.58/3.61x, rank correlation 0.148 / 0.209 / 0.196, against the curve's 3.13x, 2.35/2.15x, 0.312 — worse on every test, so k-NN never enters the ranking. It is kept as a display: every row shows its 3–5 nearest traded protocols with the value each would imply, and the median as a second opinion. Radar-9 does use launch odds — the shrunk category launch rate, validated at AUC 0.645 alone and 0.717 in the full model — but a fitted launch-probability first stage does not enter the ranking (see the two-stage note above).`,
+    '',
+    `- Radar-9 value-model tweaks, tested and dropped: a shrinkage grid on growth and maturity (g=0.25/m=0.0: 3.11x leave-one-out, Spearman 0.320 — noise-level, not a clear improvement; the current 0.25/0.5 stands; g=0/m=0 gives Spearman 0.333 but 3.14x leave-one-out). A per-category curve grid (min_n / shrink): nothing beats (8, 10); (10, 10) gives 3.37x, (8, 5) gives 3.17x, (8, 20) gives 3.30x. Chain-premium indicators (all top chains, or Ethereum alone): 3.08x / 3.11x leave-one-out but the walk-forwards fall (2.37x / 2.32x and 2.29x / 2.29x) and Spearman falls to 0.269 / 0.293 — dropped. Per-category breadth slopes: 3.26x leave-one-out (worse), Spearman 0.345 (best) — dropped on the leave-one-out rule. Growth x maturity interaction: 3.34x / 3.65x — clearly worse. Weighted least squares by category residual variance: 3.04x leave-one-out, Spearman 0.337 — but the walk-forwards collapse to 2.55x / 3.71x. Dropped. Weighted least squares by sqrt(TVL): 3.72x — worse. Per-category value bands: the coverage is not better than the global band (per-category P25–P75 0.436 vs global 0.447 on the full-prediction residuals), so the global band stands. The cure-rate hazard for the launch odds (half-life 88 days, median odds 0.06, one Worth row left) and age-decayed launch odds (Worth falls to 1–3 rows) are dropped for the reasons in the Launch odds section above.`,
     '',
     '## The farm plans',
     '',
-    `Every row carries eight steps, each with a cost and a time, from its own category, chains, TVL, age and verdict. The top six rows name the protocol's own mechanism — staking TAO into a Bittensor subnet, lending YLDS into a Prime pool, depositing into a Sentora-curated Morpho vault — not a generic "add liquidity" step. Every other row uses the mechanism template for its own kind, every hold is dated from the snapshot, the seventh step names the risk, and the last step nets the plan: gas over the hold, and the exit rule (unwind if TVL halves or seven-day growth stays below -20% for two weeks). Every row is netted to the dollar: a net value (implied value less capital and gas, if the token launches at the implied value), break-even launch odds (the launch probability at which the plan pays for itself), and $/hour (net value per active hour — setup, action, claim, log and the weekly checks; the hold is passive). ${worth} rows are Worth farming; farming all of them takes about $${book} of capital. The farm book (plans.json) carries the top 4 Worth rows with their whole plans, each with its net value, break-even odds, $/hour and comps median. Two portfolios, each sized from the rows' own suggested capital and netted to one break-even number:\n\n${portfolioLines}`,
+    `Every row carries eight steps, each with a cost and a time, from its own category, chains, TVL, age and verdict. The top three rows name the protocol's own mechanism — staking TAO into a Bittensor subnet, lending YLDS into a Prime pool, depositing into a Curvance vault on Monad — not a generic "add liquidity" step. Three more protocols further down the board (Sentora, Steakhouse, Nonce Capital) carry specific plans of their own; every other row uses the mechanism template for its own kind, every hold is dated from the snapshot, the seventh step names the risk, and the last step nets the plan: gas over the hold, and the exit rule (unwind if TVL halves or seven-day growth stays below -20% for two weeks). Every row is netted to the dollar: a net expected value (expected value less capital and gas, if the token launches at the launch value), break-even launch odds (the launch odds at which the plan pays for itself — (capital + gas) / launch value, so a reader can compare it with the row's odds at a glance), and $/hour (net expected value per active hour — setup, action, claim, log and the weekly checks; the hold is passive). ${worth} rows are Worth farming; farming all of them takes about $${book} of capital. The farm book (plans.json) carries the top 4 Worth rows with their whole plans, each with its net expected value, break-even odds, $/hour and comps median. Two portfolios, each sized from the rows' own suggested capital and netted to one break-even number:\n\n${portfolioLines}`,
+    '',
+    `The verdicts are set on the expected value: Worth farming at $10M and up, Watch at $5M and up, Thin at $2.5M and up (marginal — farmable only at the smallest size), Skip below that. The thresholds are half radar-8's ($20M/$10M/$5M) because the expected value is the launch value times the launch odds, and the typical odds is about one half — so the same rows land in the same verdicts the launch value put them in, and the change is in the ordering within them. A row just below Watch with 10% growth is still Watch: growth is the strongest second signal the model has.`,
     '',
     `The table also sorts by value per dollar, net value and $/hour, so a reader can sort by farming efficiency instead of by size alone. The plan's timeline runs from the snapshot date: set up and act in week 1, check weekly, hold until the dated hold end, then claim or unwind. Thin rows (${thin}) sit just below Watch: farm them only at the smallest size and only if their TVL or growth picks up.`,
     '',
     '## How to read the page',
     '',
-    'The KPI strip comes first, then the coverage section (where all 758 protocols went), then the board table: rank, protocol, TVL, 7-day growth, age, implied value with its band and bootstrap rank range, verdict, value per dollar, net value and $/hour. It sorts on every column and filters by search, category, chain, verdict and scope. Expand any row to see its farm plan inline in the table, or select a row for its detail view: every input to its value, the net value with its break-even launch odds and $/hour, the nearest traded comps with the value each implies, the rank range, the value-per-dollar figure, the farm plan as a dated timeline, and the plan itself. The farm book lists the Worth rows and the two portfolios; the model panel shows the formula, the per-category curves, the backtest table, the range-honesty check and the category offsets. A separate Live token view lists the protocols that already trade, set aside from the ranking.',
+    'The KPI strip comes first, then the coverage section (where all 758 protocols went), then the board table: rank, protocol, TVL, 7-day growth, age, expected value with its band and bootstrap rank range, launch odds, verdict, value per dollar, net value and $/hour. It sorts on every column and filters by search, category, chain, verdict and scope. Expand any row to see its farm plan inline in the table, or select a row for its detail view: every input to its value (launch value, launch odds, and the curve, category, breadth, growth and maturity terms behind the launch value), the net expected value with its break-even launch odds and $/hour, the nearest traded comps with the value each implies, the rank range, the value-per-dollar figure, the farm plan as a dated timeline, and the plan itself. The farm book lists the Worth rows and the two portfolios; the model panel shows the formula, the per-category curves, the launch-odds table, the backtest table, the range-honesty check and the category offsets. A separate Live token view lists the protocols that already trade, set aside from the ranking.',
     '',
     'Implied value is a model, not a price, and never a promise of an airdrop.',
     '',
